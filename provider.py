@@ -2,7 +2,7 @@
 
 from qgis.core import QgsProcessingProvider
 
-from .algorithm import KoppelWfsCsvAlgorithm
+from .algorithm_auto import KoppelWfsCsvAutoAlgorithm
 
 
 class EnexisKabelProvider(QgsProcessingProvider):
@@ -16,4 +16,4 @@ class EnexisKabelProvider(QgsProcessingProvider):
         return "Enexis kabelkoppeling"
 
     def loadAlgorithms(self):
-        self.addAlgorithm(KoppelWfsCsvAlgorithm())
+        self.addAlgorithm(KoppelWfsCsvAutoAlgorithm())
