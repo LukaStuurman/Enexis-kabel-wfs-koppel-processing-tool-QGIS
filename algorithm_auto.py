@@ -14,6 +14,7 @@ from qgis.core import (
     QgsFeatureRequest,
     QgsFeatureSink,
     QgsProcessingException,
+    QgsProcessingParameterExtent,
     QgsProcessingParameterFeatureSink,
     QgsProcessingParameterFile,
     QgsUnitTypes,
@@ -34,6 +35,7 @@ class KoppelWfsCsvAutoAlgorithm(KoppelWfsCsvAlgorithm):
 
     WFS_URL = "https://opendata.enexis.nl/geoserver/wfs"
     TYPE_NAME_CONTAINS = "e_lv_map_cable"
+    EXTENT = "EXTENT"
     _cached_type_name = None
 
     def name(self):
@@ -44,10 +46,11 @@ class KoppelWfsCsvAutoAlgorithm(KoppelWfsCsvAlgorithm):
 
     def shortHelpString(self):
         return self.tr(
-            "Je kiest alleen de CSV. De tool zoekt automatisch de Enexis "
-            "e_lv_map_cable WFS-laag, filtert de WFS zo vroeg mogelijk op de "
-            "Kabel Subgroep-labels uit de CSV en koppelt daarna strikt 1-op-1 "
-            "op de dichtstbijzijnde lengte."
+            "Je kiest de CSV en optioneel een extent. Laat de extent leeg om alleen "
+            "op Kabel Subgroep te filteren, of kies 'Use current map canvas extent' "
+            "om alleen WFS-kabels in het huidige kaartvenster op te halen. De tool "
+            "zoekt automatisch de Enexis e_lv_map_cable WFS-laag en koppelt daarna "
+            "strikt 1-op-1 op de dichtstbijzijnde lengte."
         )
 
     def createInstance(self):
@@ -60,6 +63,15 @@ class KoppelWfsCsvAutoAlgorithm(KoppelWfsCsvAlgorithm):
                 self.tr("CSV-bestand"),
                 behavior=FILE_BEHAVIOR,
                 extension="csv",
+            )
+        )
+        self.addParameter(
+            QgsProcessingParameterExtent(
+                self.EXTENT,
+                self.tr(
+                    "Beperk WFS tot scherm/gebied (optioneel; kies huidige kaartcanvas)"
+                ),
+                optional=True,
             )
         )
         self.addParameter(
@@ -184,39 +196,51 @@ class KoppelWfsCsvAutoAlgorithm(KoppelWfsCsvAlgorithm):
         return f"{quoted_field} IN ({quoted_values})"
 
     @staticmethod
-    def _feature_request(source, filter_expression, feedback):
-        """Prefer a provider subset; fall back to a feature request expression.
+    def _feature_request(source, filter_expression, extent, feedback):
+        """Build the smallest possible WFS request.
 
-        A WFS provider subset is attached to the data provider itself and is
-        therefore the strongest hint that filtering should happen remotely.
-        The fallback keeps compatibility with providers/QGIS builds that do
-        not expose subset strings.
+        The label filter is preferably attached as a provider subset so QGIS can
+        send it to the WFS server. A spatial extent is always added to the
+        QgsFeatureRequest as a filter rectangle; WFS providers can translate
+        this into a BBOX request. Both filters can therefore be active together.
         """
-        if not filter_expression:
-            return None
+        request = QgsFeatureRequest()
+        request_needed = False
 
-        provider = source.dataProvider()
-        if provider is not None and provider.supportsSubsetString():
-            try:
-                applied = provider.setSubsetString(filter_expression, False)
-            except TypeError:
-                applied = provider.setSubsetString(filter_expression)
-            except Exception:
-                applied = False
+        if filter_expression:
+            provider = source.dataProvider()
+            subset_applied = False
+            if provider is not None and provider.supportsSubsetString():
+                try:
+                    subset_applied = provider.setSubsetString(
+                        filter_expression,
+                        False,
+                    )
+                except TypeError:
+                    subset_applied = provider.setSubsetString(filter_expression)
+                except Exception:
+                    subset_applied = False
 
-            if applied:
+            if subset_applied:
                 feedback.pushInfo(
                     "Kabelgroepfilter direct op de WFS-provider ingesteld."
                 )
-                return None
+            else:
+                request.setFilterExpression(filter_expression)
+                request_needed = True
+                feedback.pushInfo(
+                    "WFS-provider accepteerde geen subsetfilter; "
+                    "QgsFeatureRequest-filter wordt gebruikt."
+                )
 
-        request = QgsFeatureRequest()
-        request.setFilterExpression(filter_expression)
-        feedback.pushInfo(
-            "WFS-provider accepteerde geen subsetfilter; "
-            "QgsFeatureRequest-filter wordt gebruikt."
-        )
-        return request
+        if extent is not None and not extent.isNull() and not extent.isEmpty():
+            request.setFilterRect(extent)
+            request_needed = True
+            feedback.pushInfo(
+                "WFS-opvraag ruimtelijk beperkt tot de gekozen scherm/gebied-extent."
+            )
+
+        return request if request_needed else None
 
     @staticmethod
     def _length_function(source_crs, transform_context):
@@ -275,6 +299,23 @@ class KoppelWfsCsvAutoAlgorithm(KoppelWfsCsvAlgorithm):
         label_field = self._detect_label_field(source)
         feedback.pushInfo("Automatisch WFS-labelveld gevonden: " + label_field)
 
+        extent = None
+        extent_value = parameters.get(self.EXTENT)
+        if extent_value not in (None, ""):
+            extent = self.parameterAsExtent(
+                parameters,
+                self.EXTENT,
+                context,
+                source_crs,
+            )
+            if extent is not None and not extent.isNull() and not extent.isEmpty():
+                feedback.pushInfo(
+                    "Gekozen extent omgerekend naar WFS-CRS: "
+                    + extent.toString()
+                )
+            else:
+                extent = None
+
         output_fields, csv_output_names, aux_names = self._output_fields(
             source_fields,
             csv_fieldnames,
@@ -317,6 +358,7 @@ class KoppelWfsCsvAutoAlgorithm(KoppelWfsCsvAlgorithm):
             feature_request = self._feature_request(
                 source,
                 filter_expression,
+                extent,
                 feedback,
             )
             feature_iterator = (
@@ -428,7 +470,11 @@ class KoppelWfsCsvAutoAlgorithm(KoppelWfsCsvAlgorithm):
             if csv_idx in csv_pre_unmatched:
                 reason = csv_pre_unmatched[csv_idx]
             elif row["label"] not in line_groups:
-                reason = "GEEN_EXACT_LABEL_IN_WFS"
+                reason = (
+                    "GEEN_MATCH_BINNEN_EXTENT"
+                    if extent is not None
+                    else "GEEN_EXACT_LABEL_IN_WFS"
+                )
             else:
                 reason = "GEEN_WFS_LIJN_OVER_IN_LABELGROEP"
 
@@ -448,11 +494,13 @@ class KoppelWfsCsvAutoAlgorithm(KoppelWfsCsvAlgorithm):
             unmatched_sink.addFeature(feature, QgsFeatureSink.FastInsert)
 
         feedback.setProgress(100.0)
+        extent_text = " met extentfilter" if extent is not None else ""
         feedback.pushInfo(
-            "Klaar met automatische WFS-laag {0}: {1} koppeling(en), "
-            "{2} WFS-lijn(en) zonder CSV-match en {3} CSV-rij(en) "
+            "Klaar met automatische WFS-laag {0}{1}: {2} koppeling(en), "
+            "{3} WFS-lijn(en) zonder CSV-match en {4} CSV-rij(en) "
             "zonder WFS-match.".format(
                 type_name,
+                extent_text,
                 len(matches),
                 len(line_records) - len(matches),
                 len(unmatched_indices),
