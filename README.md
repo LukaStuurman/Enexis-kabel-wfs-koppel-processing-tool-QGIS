@@ -4,7 +4,7 @@ QGIS Processing-plugin die Enexis WFS-kabellijnen **strikt 1-op-1** koppelt aan 
 
 ## Automatische WFS-selectie
 
-Je hoeft de WFS-laag niet meer zelf toe te voegen of te kiezen.
+Je hoeft de WFS-laag niet zelf toe te voegen of te kiezen.
 
 De Processing-tool gebruikt automatisch:
 
@@ -12,16 +12,18 @@ De Processing-tool gebruikt automatisch:
 https://opendata.enexis.nl/geoserver/wfs
 ```
 
-Bij het starten vraagt de plugin `GetCapabilities` op en zoekt hij automatisch naar een featuretype waarvan de naam `e_lv_map_cable` bevat. Als er een featuretype bestaat waarvan de lokale naam exact `e_lv_map_cable` is, krijgt die voorrang.
+Bij de eerste run in een QGIS-sessie vraagt de plugin `GetCapabilities` op en zoekt hij naar een featuretype waarvan de naam `e_lv_map_cable` bevat. Als er een featuretype bestaat waarvan de lokale naam exact `e_lv_map_cable` is, krijgt die voorrang. De gevonden naam wordt daarna voor de rest van de QGIS-sessie gecachet.
 
 Daarna:
 
 1. wordt de gevonden laag automatisch als WFS-laag geladen;
-2. wordt automatisch het veld `label` gezocht (hoofdletterongevoelig, met een fallback naar een veldnaam die `label` bevat);
-3. worden alleen WFS-features opgevraagd waarvan het label voorkomt in de CSV, zodat niet onnodig de volledige Enexis-kabellaag wordt verwerkt;
-4. wordt de eigenlijke 1-op-1 koppeling uitgevoerd.
+2. wordt automatisch het veld `label` gezocht;
+3. worden alleen geldige `Kabel Subgroep`-labels uit de CSV in het WFS-filter opgenomen;
+4. probeert de plugin dit filter direct als subset op de WFS-provider te zetten, zodat de filtering zo vroeg mogelijk bij de bron plaatsvindt;
+5. als de provider geen subsetfilter accepteert, wordt automatisch teruggevallen op een `QgsFeatureRequest`-filter;
+6. wordt de eigenlijke 1-op-1 koppeling uitgevoerd.
 
-De enige normale invoer die je in de Processing-tool hoeft te kiezen is dus de **CSV**.
+De enige normale invoer is dus de **CSV**.
 
 ## Koppelregels
 
@@ -33,6 +35,24 @@ De enige normale invoer die je in de Processing-tool hoeft te kiezen is dus de *
 6. Bij ongelijke aantallen worden zo veel mogelijk paren gemaakt. Overtollige WFS-lijnen en CSV-rijen blijven expliciet ongekoppeld.
 
 De 1-op-1 matching minimaliseert per labelgroep de totale absolute afwijking tussen WFS-lengtes en CSV-lengtes.
+
+## Prestatie-optimalisaties
+
+De automatische variant is bewust geoptimaliseerd zonder onveilige extra QGIS-threads:
+
+- **Server-side WFS-filtering:** eerst wordt geprobeerd het label-filter direct op de WFS-provider te zetten. Hierdoor hoeft normaal niet de landelijke kabellaag naar QGIS te worden gehaald.
+- **Alleen bruikbare labels:** CSV-regels zonder geldig label of zonder geldige lengte veroorzaken geen onnodige WFS-opvraag.
+- **WFS-laagnaamcache:** `GetCapabilities` voor de automatische type-detectie wordt binnen dezelfde QGIS-sessie maar één keer gedaan.
+- **Lengteberekening voorbereid:** CRS-conversie en `QgsDistanceArea` worden één keer voorbereid in plaats van opnieuw per feature.
+- **Lichtere featureadministratie:** intern worden compacte tuples gebruikt in plaats van dictionaries per WFS-feature.
+- **Snelle matching bij gelijke aantallen:** wanneer WFS en CSV binnen een kabelgroep evenveel delen hebben, is sorteren + positie-op-positie koppelen globaal optimaal. Dit is `O(n log n)` in plaats van de eerdere `O(n²)` dynamic programming.
+- **Compactere matching bij ongelijke aantallen:** de optimale DP gebruikt nog maar twee kostenrijen en één byte per terugzoekbeslissing, in plaats van twee volledige Python-matrices.
+
+### Waarom geen extra threads/cores?
+
+QGIS Processing voert algoritmes standaard al in een aparte achtergrondthread uit. QGIS waarschuwt bovendien dat objecten zoals `QgsVectorLayer` en `QgsProject` niet zomaar vanuit extra worker-threads mogen worden gebruikt. De CPU-matching is pure Python, waardoor gewone Python-threads door de GIL ook weinig tot geen versnelling geven.
+
+Meerdere processen zouden alleen interessant worden bij uitzonderlijk grote kabelgroepen, maar hebben op Windows/QGIS relatief veel opstart- en serialisatie-overhead. Voor deze tool is het veel effectiever om de WFS-opvraag klein te houden en het matching-algoritme zelf efficiënter te maken.
 
 ## CSV-input
 
