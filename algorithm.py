@@ -13,6 +13,7 @@ from qgis.core import (
     QgsFeatureSink,
     QgsField,
     QgsFields,
+    Qgis,
     QgsProcessing,
     QgsProcessingAlgorithm,
     QgsProcessingException,
@@ -26,6 +27,34 @@ from qgis.core import (
 )
 
 from .matching import normalize_label, optimal_one_to_one, parse_decimal
+
+
+# QGIS moved several Processing/WKB/unit enums after QGIS 3.28. Keep this
+# plugin usable on both the 3.x API and newer API layouts.
+try:
+    VECTOR_LINE_SOURCE = Qgis.ProcessingSourceType.VectorLine
+except AttributeError:
+    VECTOR_LINE_SOURCE = QgsProcessing.TypeVectorLine
+
+try:
+    STRING_FIELD_TYPE = Qgis.ProcessingFieldParameterDataType.String
+except AttributeError:
+    STRING_FIELD_TYPE = QgsProcessingParameterField.String
+
+try:
+    FILE_BEHAVIOR = Qgis.ProcessingFileParameterBehavior.File
+except AttributeError:
+    FILE_BEHAVIOR = QgsProcessingParameterFile.File
+
+try:
+    DISTANCE_METERS = Qgis.DistanceUnit.Meters
+except AttributeError:
+    DISTANCE_METERS = QgsUnitTypes.DistanceMeters
+
+try:
+    NO_GEOMETRY = Qgis.WkbType.NoGeometry
+except AttributeError:
+    NO_GEOMETRY = QgsWkbTypes.NoGeometry
 
 
 class KoppelWfsCsvAlgorithm(QgsProcessingAlgorithm):
@@ -70,7 +99,7 @@ class KoppelWfsCsvAlgorithm(QgsProcessingAlgorithm):
             QgsProcessingParameterFeatureSource(
                 self.INPUT_LINES,
                 self.tr("Enexis WFS-kabellijnen"),
-                [QgsProcessing.TypeVectorLine],
+                [VECTOR_LINE_SOURCE],
             )
         )
         self.addParameter(
@@ -78,7 +107,7 @@ class KoppelWfsCsvAlgorithm(QgsProcessingAlgorithm):
                 self.LABEL_FIELD,
                 self.tr("WFS-veld met label (bijv. label)"),
                 parentLayerParameterName=self.INPUT_LINES,
-                type=QgsProcessingParameterField.String,
+                type=STRING_FIELD_TYPE,
                 defaultValue="label",
             )
         )
@@ -86,7 +115,7 @@ class KoppelWfsCsvAlgorithm(QgsProcessingAlgorithm):
             QgsProcessingParameterFile(
                 self.CSV_FILE,
                 self.tr("CSV-bestand"),
-                behavior=QgsProcessingParameterFile.File,
+                behavior=FILE_BEHAVIOR,
                 extension="csv",
             )
         )
@@ -195,16 +224,26 @@ class KoppelWfsCsvAlgorithm(QgsProcessingAlgorithm):
     def _length_m(self, geometry, source_crs, transform_context):
         if geometry is None or geometry.isEmpty():
             return None
+
+        # "Lengte [kaart]" is a map/geometry length. For projected WFS data
+        # (e.g. Dutch RD New) use the planar geometry length and only convert
+        # the CRS map unit to meters. This avoids introducing ellipsoidal
+        # differences which are not present in the map length.
+        if not source_crs.isGeographic():
+            factor = QgsUnitTypes.fromUnitToUnitFactor(
+                source_crs.mapUnits(), DISTANCE_METERS
+            )
+            return round(geometry.length() * factor, 2)
+
+        # Geographic CRS: measure geodesically so degrees are not treated as
+        # linear units. The result is converted to meters before rounding.
         distance = QgsDistanceArea()
         distance.setSourceCrs(source_crs, transform_context)
         ellipsoid = QgsProject.instance().ellipsoid()
         if ellipsoid:
             distance.setEllipsoid(ellipsoid)
         measured = distance.measureLength(geometry)
-        return round(
-            distance.convertLengthMeasurement(measured, QgsUnitTypes.DistanceMeters),
-            2,
-        )
+        return round(distance.convertLengthMeasurement(measured, DISTANCE_METERS), 2)
 
     def processAlgorithm(self, parameters, context, feedback):
         source = self.parameterAsSource(parameters, self.INPUT_LINES, context)
@@ -238,7 +277,7 @@ class KoppelWfsCsvAlgorithm(QgsProcessingAlgorithm):
             self.UNMATCHED_CSV,
             context,
             unmatched_fields,
-            QgsWkbTypes.NoGeometry,
+            NO_GEOMETRY,
             source.sourceCrs(),
         )
         if unmatched_sink is None:
