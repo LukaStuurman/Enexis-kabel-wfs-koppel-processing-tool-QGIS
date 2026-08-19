@@ -25,12 +25,7 @@ def normalize_label(value) -> str:
 
 
 def parse_decimal(value) -> float:
-    """Parse Dutch or dot-decimal numeric text to float.
-
-    Accepts values such as ``195``, ``16,5``, ``196,11`` and ``196.11``.
-    Thousands separators are handled when both comma and dot are present.
-    Raises ValueError for empty/non-numeric values.
-    """
+    """Parse Dutch or dot-decimal numeric text to float."""
     if value is None:
         raise ValueError("lege waarde")
 
@@ -53,19 +48,27 @@ def parse_decimal(value) -> float:
     return number
 
 
+def _sort_items(items: Sequence[Tuple[int, float]]) -> List[Tuple[int, float]]:
+    return sorted(items, key=lambda item: (item[1], item[0]))
+
+
 def _match_smaller_to_larger(
     smaller: Sequence[Tuple[int, float]],
     larger: Sequence[Tuple[int, float]],
 ) -> List[Tuple[int, int]]:
     """Match every item in ``smaller`` to a unique item in ``larger``.
 
-    Both sides are sorted by (length, original index). Dynamic programming
-    selects the ordered subset in the larger side that minimizes the total
-    absolute length difference. For one-dimensional absolute distance this
-    yields a globally optimal one-to-one assignment.
+    In one dimension, an optimal absolute-distance assignment never needs
+    crossing pairs after both sides are sorted by length. Equal-sized groups
+    therefore reduce to a simple sorted zip. Unequal groups use dynamic
+    programming to select the optimal ordered subset from the larger side.
+
+    The DP keeps only two cost rows in memory. Backtracking choices use
+    bytearrays instead of Python bool/object matrices, greatly reducing memory
+    use for large duplicate cable groups.
     """
-    a = sorted(smaller, key=lambda item: (item[1], item[0]))
-    b = sorted(larger, key=lambda item: (item[1], item[0]))
+    a = _sort_items(smaller)
+    b = _sort_items(larger)
     n, m = len(a), len(b)
 
     if n == 0:
@@ -73,25 +76,51 @@ def _match_smaller_to_larger(
     if n > m:
         raise ValueError("smaller mag niet groter zijn dan larger")
 
-    inf = float("inf")
-    dp = [[inf] * (m + 1) for _ in range(n + 1)]
-    take = [[False] * (m + 1) for _ in range(n + 1)]
+    # Fast path: when both sides contain the same number of items, sorted
+    # position-to-position matching is globally optimal for absolute distance.
+    # This changes the common case from O(n^2) DP to O(n log n) sorting.
+    if n == m:
+        return [(a[i][0], b[i][0]) for i in range(n)]
 
-    for j in range(m + 1):
-        dp[0][j] = 0.0
+    # Fast path for a single item: just take the nearest candidate. Tie-break
+    # by length and original index for deterministic output.
+    if n == 1:
+        left_idx, left_length = a[0]
+        right_idx, _ = min(
+            b,
+            key=lambda item: (
+                abs(left_length - item[1]),
+                item[1],
+                item[0],
+            ),
+        )
+        return [(left_idx, right_idx)]
+
+    inf = float("inf")
+    previous = [0.0] * (m + 1)
+
+    # One byte per DP decision instead of a Python bool object plus a complete
+    # float matrix. CPU remains O(n*m), but memory drops to roughly n*m bytes
+    # plus two float rows.
+    take = [bytearray(m + 1) for _ in range(n + 1)]
 
     for i in range(1, n + 1):
+        current = [inf] * (m + 1)
+        left_length = a[i - 1][1]
+
         # At least i larger-side candidates are needed to match i items.
         for j in range(i, m + 1):
-            skip_cost = dp[i][j - 1]
-            match_cost = dp[i - 1][j - 1] + abs(a[i - 1][1] - b[j - 1][1])
+            skip_cost = current[j - 1]
+            match_cost = previous[j - 1] + abs(left_length - b[j - 1][1])
 
             # Prefer the earlier candidate on an exact tie for stable output.
             if match_cost < skip_cost or math.isinf(skip_cost):
-                dp[i][j] = match_cost
-                take[i][j] = True
+                current[j] = match_cost
+                take[i][j] = 1
             else:
-                dp[i][j] = skip_cost
+                current[j] = skip_cost
+
+        previous = current
 
     pairs: List[Tuple[int, int]] = []
     i, j = n, m
