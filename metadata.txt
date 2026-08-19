@@ -1,0 +1,14 @@
+[general]
+name=Enexis Kabel WFS-CSV Koppeling
+description=QGIS Processing-tool voor exacte Kabel Subgroep-koppeling en 1-op-1 lengtematching van Enexis WFS-kabellijnen aan CSV.
+version=0.1.0
+qgisMinimumVersion=3.28
+author=LukaStuurman
+email=
+about=Koppelt WFS-labels na verwijderen van 'Kabelgroup: ' exact aan 'Kabel Subgroep' en wijst dubbele groepen 1-op-1 toe op basis van de dichtstbijzijnde lengte.
+category=Vector
+experimental=False
+deprecated=False
+repository=https://github.com/LukaStuurman/Enexis-kabel-wfs-koppel-processing-tool-QGIS
+homepage=https://github.com/LukaStuurman/Enexis-kabel-wfs-koppel-processing-tool-QGIS
+tracker=https://github.com/LukaStuurman/Enexis-kabel-wfs-koppel-processing-tool-QGIS/issues
