@@ -20,10 +20,20 @@ Daarna:
 2. wordt automatisch het veld `label` gezocht;
 3. worden alleen geldige `Kabel Subgroep`-labels uit de CSV in het WFS-filter opgenomen;
 4. probeert de plugin dit filter direct als subset op de WFS-provider te zetten, zodat de filtering zo vroeg mogelijk bij de bron plaatsvindt;
-5. als de provider geen subsetfilter accepteert, wordt automatisch teruggevallen op een `QgsFeatureRequest`-filter;
+5. kan de WFS-opvraag optioneel ook tot een scherm/gebied-extent worden beperkt;
 6. wordt de eigenlijke 1-op-1 koppeling uitgevoerd.
 
-De enige normale invoer is dus de **CSV**.
+## Alleen huidige schermextent gebruiken
+
+Naast de CSV heeft de tool een **optionele extent-invoer**:
+
+- **Extent leeg laten:** de tool beperkt de WFS alleen op de Kabel Subgroep-labels uit de CSV.
+- **Use current map canvas extent:** alleen WFS-kabels die de huidige kaartweergave raken worden opgehaald en verwerkt.
+- Je kunt via dezelfde standaard QGIS extent-selector ook een gebied tekenen, een laagextent kiezen of een bookmark/layout-extent gebruiken.
+
+De gekozen extent wordt door QGIS automatisch omgerekend naar het CRS van de Enexis WFS-laag. Daarna wordt hij als ruimtelijke `QgsFeatureRequest`-filter (`setFilterRect`) toegepast, naast het label-filter.
+
+Als een CSV-regel bij een actieve extent geen WFS-kabel binnen het gekozen gebied heeft, krijgt die in de tabel met niet-gekoppelde CSV-regels de reden `GEEN_MATCH_BINNEN_EXTENT`.
 
 ## Koppelregels
 
@@ -40,7 +50,8 @@ De 1-op-1 matching minimaliseert per labelgroep de totale absolute afwijking tus
 
 De automatische variant is bewust geoptimaliseerd zonder onveilige extra QGIS-threads:
 
-- **Server-side WFS-filtering:** eerst wordt geprobeerd het label-filter direct op de WFS-provider te zetten. Hierdoor hoeft normaal niet de landelijke kabellaag naar QGIS te worden gehaald.
+- **Server-side labelfiltering:** eerst wordt geprobeerd het label-filter direct op de WFS-provider te zetten. Hierdoor hoeft normaal niet de landelijke kabellaag naar QGIS te worden gehaald.
+- **Optionele extentfilter:** bij een gekozen scherm/gebied wordt de feature-opvraag ook ruimtelijk beperkt, wat vooral bij grote labelsets netwerk- en verwerkingstijd kan besparen.
 - **Alleen bruikbare labels:** CSV-regels zonder geldig label of zonder geldige lengte veroorzaken geen onnodige WFS-opvraag.
 - **WFS-laagnaamcache:** `GetCapabilities` voor de automatische type-detectie wordt binnen dezelfde QGIS-sessie maar één keer gedaan.
 - **Lengteberekening voorbereid:** CRS-conversie en `QgsDistanceArea` worden één keer voorbereid in plaats van opnieuw per feature.
@@ -50,7 +61,7 @@ De automatische variant is bewust geoptimaliseerd zonder onveilige extra QGIS-th
 
 ### Waarom geen extra threads/cores?
 
-QGIS Processing voert algoritmes standaard al in een aparte achtergrondthread uit. QGIS waarschuwt bovendien dat objecten zoals `QgsVectorLayer` en `QgsProject` niet zomaar vanuit extra worker-threads mogen worden gebruikt. De CPU-matching is pure Python, waardoor gewone Python-threads door de GIL ook weinig tot geen versnelling geven.
+QGIS Processing voert algoritmes standaard al in een aparte achtergrondthread uit. QGIS-objecten zoals `QgsVectorLayer` moeten niet zonder meer over extra worker-threads worden gedeeld. De CPU-matching is pure Python, waardoor gewone Python-threads door de GIL ook weinig tot geen versnelling geven.
 
 Meerdere processen zouden alleen interessant worden bij uitzonderlijk grote kabelgroepen, maar hebben op Windows/QGIS relatief veel opstart- en serialisatie-overhead. Voor deze tool is het veel effectiever om de WFS-opvraag klein te houden en het matching-algoritme zelf efficiënter te maken.
 
@@ -70,7 +81,9 @@ Het scheidingsteken wordt automatisch gedetecteerd. Komma- en puntdecimalen word
 3. Ga naar **Plugins → Plugins beheren en installeren → Installeren vanuit ZIP**.
 4. Kies de ZIP en installeer **Enexis Kabel WFS-CSV Koppeling**.
 5. Open **Processing → Toolbox → Enexis → Kabelkoppeling → Koppel Enexis WFS-kabels automatisch aan CSV (1-op-1)**.
-6. Kies alleen je CSV en start de tool.
+6. Kies je CSV.
+7. Optioneel: kies bij de extent-invoer **Use current map canvas extent** als je alleen het huidige scherm wilt verwerken.
+8. Start de tool.
 
 Een internetverbinding is vereist tijdens het uitvoeren, omdat QGIS de Enexis WFS-service rechtstreeks benadert.
 
@@ -92,7 +105,7 @@ Belangrijke statussen zijn onder andere `GEKOPPELD`, `GEEN_EXACT_LABEL_IN_CSV`, 
 
 ### Niet-gekoppelde CSV-rijen
 
-Een tweede tabel bevat alle CSV-rijen die niet zijn gebruikt, inclusief reden.
+Een tweede tabel bevat alle CSV-rijen die niet zijn gebruikt, inclusief reden. Met een actieve extent wordt `GEEN_MATCH_BINNEN_EXTENT` gebruikt wanneer voor die CSV-regel geen passende WFS-kabel binnen het gekozen gebied is opgehaald.
 
 ## Praktische controle
 
