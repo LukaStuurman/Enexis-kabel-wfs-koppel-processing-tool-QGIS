@@ -1,12 +1,23 @@
-# Enexis kabel WFS ↔ CSV koppeling voor QGIS
+# Enexis kabel WFS ↔ CSV koppeling voor QGIS 4.2
 
 QGIS Processing-plugin die Enexis `e_lv_map_cable`-kabellijnen **strikt 1-op-1** koppelt aan rijen uit een CSV-export.
 
-## Belangrijk: v0.4.0 gebruikt geen live QGIS WFS-provider meer
+## Vereiste versie
+
+Vanaf **v0.5.0** is de plugin expliciet gebouwd voor **QGIS 4.2.0 of nieuwer binnen de 4.x-reeks**. De code gebruikt de Qt6/PyQt6-compatibele QGIS 4 API:
+
+- `QMetaType.Type.*` voor veldtypes in plaats van oude `QVariant.*`-types;
+- `Qgis.WkbType.*` voor geometrie-enums;
+- `QgsFeatureSink.Flag.FastInsert` voor sink-flags;
+- `Qgis.ProcessingFileParameterBehavior.File` voor Processing-bestandsparameters.
+
+De pluginmetadata heeft daarom `qgisMinimumVersion=4.2`.
+
+## Geen live QGIS WFS-provider
 
 Versie 0.3.0 gebruikte een live `QgsVectorLayer` met de QGIS WFS-provider, een attributenfilter en een BBOX-filter. Dat bleek in de praktijk traag en kon bij de geteste schermextent QGIS laten crashen.
 
-Vanaf **v0.4.0** is die route verwijderd. De plugin:
+Vanaf **v0.4.0** en dus ook in v0.5.0 is die route verwijderd. De plugin:
 
 1. bouwt zelf een WFS `GetFeature`-request naar `https://opendata.enexis.nl/geoserver/wfs`;
 2. stuurt de `Kabel Subgroep`-labels direct als GeoServer `cql_filter` mee;
@@ -14,7 +25,7 @@ Vanaf **v0.4.0** is die route verwijderd. De plugin:
 4. vraagt het resultaat direct als `application/json` (GeoJSON) op;
 5. verwerkt pas daarna de GeoJSON-features in QGIS.
 
-Er wordt dus **geen live WFS-laag meer aangemaakt**, geen `setSubsetString()` meer uitgevoerd en de QGIS WFS achtergrondcache/downloader wordt niet meer gebruikt.
+Er wordt dus **geen live WFS-laag meer aangemaakt**, geen `setSubsetString()` uitgevoerd en de QGIS WFS achtergrondcache/downloader wordt niet gebruikt.
 
 ## Invoer
 
@@ -45,7 +56,7 @@ CSV-rijen zonder gevonden kabel binnen een actieve extent krijgen `GEEN_MATCH_BI
 
 ### Permanente laagnaamcache
 
-De gevonden volledige WFS-typename wordt nu in QGIS-instellingen opgeslagen. Daardoor hoeft na een QGIS-herstart niet opnieuw steeds `GetCapabilities` te worden doorlopen.
+De gevonden volledige WFS-typename wordt in de QGIS 4-instellingen opgeslagen. Daardoor hoeft na een QGIS-herstart niet opnieuw steeds `GetCapabilities` te worden doorlopen.
 
 Als nog geen typename bekend is probeert de plugin eerst rechtstreeks `e_lv_map_cable`. Alleen wanneer GeoServer die ongekwalificeerde naam niet accepteert, wordt eenmalig `GetCapabilities` gebruikt om de volledige namespace/typename te vinden.
 
@@ -53,7 +64,7 @@ Als nog geen typename bekend is probeert de plugin eerst rechtstreeks `e_lv_map_
 
 Bij grotere CSV's worden labels in batches van maximaal 40 kabelgroepen verdeeld. Als meerdere batches nodig zijn, gebruikt de plugin maximaal **4 HTTP-threads**.
 
-Deze threads doen uitsluitend netwerk-I/O en raken geen QGIS-laag, geometrie of projectobject aan. Dat is wezenlijk anders dan meerdere threads op een `QgsVectorLayer` loslaten.
+Deze threads doen uitsluitend netwerk-I/O en raken geen QGIS-laag, geometrie of projectobject aan.
 
 Bij kleine CSV's wordt bewust maar één request gebruikt, omdat extra parallelle requests dan meestal geen winst geven.
 
@@ -90,13 +101,13 @@ Een tweede tabel bevat alle niet gebruikte CSV-regels met een reden, bijvoorbeel
 - `GEEN_WFS_LIJN_OVER_IN_LABELGROEP`
 - `ONGELDIGE_CSV_LENGTE`
 
-## Installatie
+## Installatie in QGIS 4.2.0
 
 1. Download de nieuwste repository als ZIP.
-2. Open QGIS.
-3. **Plugins → Plugins beheren en installeren → Installeren vanuit ZIP**.
+2. Open **QGIS 4.2.0**.
+3. Ga naar **Plugins → Plugins beheren en installeren → Installeren vanuit ZIP**.
 4. Installeer **Enexis Kabel WFS-CSV Koppeling**.
-5. Controleer dat versie **0.4.0 of hoger** actief is.
+5. Controleer dat versie **0.5.0 of hoger** actief is.
 6. Open **Processing → Toolbox → Enexis → Kabelkoppeling → Koppel Enexis WFS-kabels automatisch aan CSV (1-op-1)**.
 7. Kies je CSV en eventueel **Use current map canvas extent**.
 
