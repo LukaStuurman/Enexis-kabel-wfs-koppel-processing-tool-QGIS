@@ -5,41 +5,25 @@ from __future__ import annotations
 
 import csv
 
-from qgis.PyQt.QtCore import QCoreApplication, QVariant
+from qgis.PyQt.QtCore import QCoreApplication, QMetaType
 from qgis.core import (
     QgsField,
     QgsFields,
     Qgis,
     QgsProcessingAlgorithm,
     QgsProcessingException,
-    QgsProcessingParameterFile,
-    QgsUnitTypes,
-    QgsWkbTypes,
 )
 
 from .matching import normalize_label, parse_decimal
 
 
-# QGIS moved several enums after QGIS 3.28. Keep compatibility with both the
-# classic QGIS 3.x API and newer enum layouts.
-try:
-    FILE_BEHAVIOR = Qgis.ProcessingFileParameterBehavior.File
-except AttributeError:
-    FILE_BEHAVIOR = QgsProcessingParameterFile.File
-
-try:
-    DISTANCE_METERS = Qgis.DistanceUnit.Meters
-except AttributeError:
-    DISTANCE_METERS = QgsUnitTypes.DistanceMeters
-
-try:
-    NO_GEOMETRY = Qgis.WkbType.NoGeometry
-except AttributeError:
-    NO_GEOMETRY = QgsWkbTypes.NoGeometry
+# QGIS 4.2 / Qt6 native enum and field types.
+FILE_BEHAVIOR = Qgis.ProcessingFileParameterBehavior.File
+NO_GEOMETRY = Qgis.WkbType.NoGeometry
 
 
 class KoppelWfsCsvAlgorithm(QgsProcessingAlgorithm):
-    """Base class containing only helpers shared by the automatic algorithm."""
+    """Base class containing helpers shared by the automatic algorithm."""
 
     CSV_FILE = "CSV_FILE"
     OUTPUT = "OUTPUT"
@@ -120,17 +104,17 @@ class KoppelWfsCsvAlgorithm(QgsProcessingAlgorithm):
         for csv_name in csv_fieldnames:
             wanted = "csv_" + csv_name
             unique = self._unique_field_name(fields, wanted)
-            fields.append(QgsField(unique, QVariant.String))
+            fields.append(QgsField(unique, QMetaType.Type.QString))
             csv_output_names[csv_name] = unique
 
         aux_names = {}
         aux_specs = [
-            ("match_status", QVariant.String),
-            ("wfs_label_norm", QVariant.String),
-            ("wfs_len_m", QVariant.Double),
-            ("csv_len_m", QVariant.Double),
-            ("len_diff_m", QVariant.Double),
-            ("csv_row_nr", QVariant.Int),
+            ("match_status", QMetaType.Type.QString),
+            ("wfs_label_norm", QMetaType.Type.QString),
+            ("wfs_len_m", QMetaType.Type.Double),
+            ("csv_len_m", QMetaType.Type.Double),
+            ("len_diff_m", QMetaType.Type.Double),
+            ("csv_row_nr", QMetaType.Type.Int),
         ]
         for wanted, field_type in aux_specs:
             unique = self._unique_field_name(fields, wanted)
@@ -142,9 +126,9 @@ class KoppelWfsCsvAlgorithm(QgsProcessingAlgorithm):
     def _unmatched_csv_fields(csv_fieldnames):
         fields = QgsFields()
         for name in csv_fieldnames:
-            fields.append(QgsField(name, QVariant.String))
-        fields.append(QgsField("csv_rij_nr", QVariant.Int))
-        fields.append(QgsField("csv_label_norm", QVariant.String))
-        fields.append(QgsField("csv_len_m", QVariant.Double))
-        fields.append(QgsField("reden", QVariant.String))
+            fields.append(QgsField(name, QMetaType.Type.QString))
+        fields.append(QgsField("csv_rij_nr", QMetaType.Type.Int))
+        fields.append(QgsField("csv_label_norm", QMetaType.Type.QString))
+        fields.append(QgsField("csv_len_m", QMetaType.Type.Double))
+        fields.append(QgsField("reden", QMetaType.Type.QString))
         return fields
