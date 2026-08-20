@@ -1,11 +1,11 @@
 [general]
 name=Enexis Kabel WFS-CSV Koppeling
-description=QGIS Processing-tool voor exacte Kabel Subgroep-koppeling, optionele schermextent en snelle directe GeoJSON WFS-opvraging.
-version=0.4.0
-qgisMinimumVersion=3.28
+description=QGIS 4.2 Processing-tool voor exacte Kabel Subgroep-koppeling, optionele schermextent en snelle directe GeoJSON WFS-opvraging.
+version=0.5.0
+qgisMinimumVersion=4.2
 author=LukaStuurman
 email=
-about=Haalt e_lv_map_cable rechtstreeks via gefilterde WFS GetFeature GeoJSON op, zonder live QGIS WFS-provider, en koppelt strikt 1-op-1 op Kabel Subgroep en lengte.
+about=QGIS 4.2-native tool die e_lv_map_cable rechtstreeks via gefilterde WFS GetFeature GeoJSON ophaalt, zonder live QGIS WFS-provider, en strikt 1-op-1 koppelt op Kabel Subgroep en lengte.
 category=Vector
 experimental=False
 deprecated=False
