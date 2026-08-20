@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Fast and crash-safe automatic Enexis WFS/CSV matching algorithm."""
+"""Fast and crash-safe automatic Enexis WFS/CSV matching algorithm for QGIS 4.2."""
 
 from __future__ import annotations
 
@@ -12,6 +12,7 @@ from xml.etree import ElementTree
 
 from qgis.PyQt.QtCore import QSettings
 from qgis.core import (
+    Qgis,
     QgsCoordinateReferenceSystem,
     QgsFeature,
     QgsFeatureSink,
@@ -21,7 +22,6 @@ from qgis.core import (
     QgsProcessingParameterExtent,
     QgsProcessingParameterFeatureSink,
     QgsProcessingParameterFile,
-    QgsWkbTypes,
 )
 
 from .algorithm import FILE_BEHAVIOR, KoppelWfsCsvAlgorithm, NO_GEOMETRY
@@ -39,6 +39,7 @@ class KoppelWfsCsvAutoAlgorithm(KoppelWfsCsvAlgorithm):
     TYPE_NAME_CONTAINS = "e_lv_map_cable"
     LABEL_FIELD = "label"
     EXTENT = "EXTENT"
+    RD_EPSG = 28992
     RD_AUTHID = "EPSG:28992"
     LABELS_PER_REQUEST = 40
     MAX_HTTP_WORKERS = 4
@@ -340,7 +341,7 @@ class KoppelWfsCsvAutoAlgorithm(KoppelWfsCsvAlgorithm):
             else:
                 csv_groups[row["label"]].append((csv_idx, row["length_m"]))
 
-        source_crs = QgsCoordinateReferenceSystem(self.RD_AUTHID)
+        source_crs = QgsCoordinateReferenceSystem.fromEpsgId(self.RD_EPSG)
         extent = None
         extent_value = parameters.get(self.EXTENT)
         if extent_value not in (None, ""):
@@ -356,7 +357,6 @@ class KoppelWfsCsvAutoAlgorithm(KoppelWfsCsvAlgorithm):
                 feedback.pushInfo("Scherm/gebied-extent wordt direct als WFS BBOX verstuurd.")
 
         type_name = self._stored_type_name() or self.TYPE_NAME_CONTAINS
-        geojson_texts = []
         source_fields = QgsFields()
         source_features = []
 
@@ -381,7 +381,7 @@ class KoppelWfsCsvAutoAlgorithm(KoppelWfsCsvAlgorithm):
                 "WFS GeoJSON bevat features maar geen veld met 'label' in de naam."
             )
 
-        source_wkb_type = QgsWkbTypes.LineString
+        source_wkb_type = Qgis.WkbType.LineString
         for feature in source_features:
             geometry = feature.geometry()
             if geometry is not None and not geometry.isEmpty():
@@ -489,7 +489,7 @@ class KoppelWfsCsvAutoAlgorithm(KoppelWfsCsvAlgorithm):
 
             attrs[output_index[aux_names["match_status"]]] = status
             out.setAttributes(attrs)
-            sink.addFeature(out, QgsFeatureSink.FastInsert)
+            sink.addFeature(out, QgsFeatureSink.Flag.FastInsert)
 
         feedback.setProgress(90.0)
         unmatched_indices = [
@@ -514,7 +514,7 @@ class KoppelWfsCsvAutoAlgorithm(KoppelWfsCsvAlgorithm):
                 [row["row_number"], row["label"], row["length_m"], reason]
             )
             feature.setAttributes(values)
-            unmatched_sink.addFeature(feature, QgsFeatureSink.FastInsert)
+            unmatched_sink.addFeature(feature, QgsFeatureSink.Flag.FastInsert)
 
         feedback.setProgress(100.0)
         feedback.pushInfo(
