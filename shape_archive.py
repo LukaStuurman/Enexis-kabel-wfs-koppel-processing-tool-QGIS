@@ -12,11 +12,12 @@ import zipfile
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
-# Current Enexis/Spotler SHAPE download link supplied by the user.
+# Verified 2026-08-21 against the public Enexis S3 bucket and opened with
+# GDAL/OGR in the official QGIS 4.2 container. Do not use the Spotler tracking
+# URL here: that URL currently serves HTML meta-refreshing to the CSV archive.
 SHAPE_DOWNLOAD_URL = (
-    "https://c.spotler.com/ct/m3/k1/"
-    "KdKQtH6B0wZjnPBT7BzqOtEsn-w1iebQF8ZDB2NGKTYcA4pq8agO-N_rqoymPoGmXmbyRWK5Y-t6tJGhGUv84awweWYQnJYsH5vDkKODg3_b1yt9gHlYGgO6bvmtvIKmr8wPsm5YhfVgEzVmNVPQ6wqVW49PJ4Twysgqdkc00ryGvq4cQnuanRps7J1UzY9JRCE_DjZR-FqZ7a2pj5ESEw/"
-    "ig3SD3vmbjdIP76"
+    "https://enxp433-opendata-publications.s3.eu-west-1.amazonaws.com/"
+    "Open_Asset_Data_Elektra.zip"
 )
 TARGET_FOLDER = "imkl_elektriciteitskabel_e_lv_map_cable_ligging"
 DOWNLOAD_ID = hashlib.sha256(SHAPE_DOWNLOAD_URL.encode("utf-8")).hexdigest()[:12]
@@ -64,7 +65,7 @@ def archive_fingerprint(path):
 
 
 def download_archive(destination, feedback=None):
-    """Stream the remote ZIP to a sibling temp file and replace atomically."""
+    """Stream the verified public SHAPE ZIP to disk and replace atomically."""
     folder = os.path.dirname(destination)
     fd, temp_path = tempfile.mkstemp(
         prefix="enexis_shape_download_", suffix=".zip.part", dir=folder
@@ -121,7 +122,8 @@ def download_archive(destination, feedback=None):
 
         if not zipfile.is_zipfile(temp_path):
             raise ShapeArchiveError(
-                "De download via de Enexis-link is geen geldige ZIP. De downloadlink kan gewijzigd of verlopen zijn."
+                "De Enexis SHAPE-bron gaf geen geldige ZIP terug. "
+                "De publieke downloadlocatie kan gewijzigd zijn."
             )
         os.replace(temp_path, destination)
         return destination
