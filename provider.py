@@ -2,7 +2,7 @@
 
 from qgis.core import QgsProcessingProvider
 
-from .algorithm_fast import KoppelWfsCsvAutoAlgorithm
+from .algorithm_source import KoppelWfsCsvAutoAlgorithm
 from .algorithm_dxf import SplitNaarDXF
 
 
