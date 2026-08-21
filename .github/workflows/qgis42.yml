@@ -16,7 +16,7 @@ jobs:
       - name: Pure Python tests
         run: python3 -m unittest discover -s tests -v
 
-      - name: QGIS 4.2 plugin import smoke test
+      - name: QGIS 4.2 plugin and low-resource parser smoke test
         shell: bash
         run: |
           set -euo pipefail
@@ -24,12 +24,18 @@ jobs:
           mkdir -p /tmp/qgis-plugin-test/enexiskabel
           cp -R . /tmp/qgis-plugin-test/enexiskabel/
           PYTHONPATH=/tmp/qgis-plugin-test python3 - <<'PY'
-          from qgis.core import QgsApplication, Qgis
+          from qgis.PyQt.QtCore import QMetaType
+          from qgis.core import (
+              QgsApplication,
+              QgsField,
+              QgsFields,
+              QgsJsonUtils,
+              Qgis,
+          )
 
           app = QgsApplication([], False)
           app.initQgis()
 
-          from enexiskabel.algorithm import KoppelWfsCsvAlgorithm
           from enexiskabel.algorithm_auto import KoppelWfsCsvAutoAlgorithm
           from enexiskabel.provider import EnexisKabelProvider
 
@@ -39,11 +45,30 @@ jobs:
           algorithm.initAlgorithm()
           assert algorithm.name() == "koppel_enexis_wfs_kabels_automatisch_aan_csv"
           assert len(algorithm.parameterDefinitions()) == 4
+          assert algorithm.LABELS_PER_REQUEST == 5
+          assert algorithm.MAX_FEATURES_PER_BATCH == 500
+          assert algorithm.MAX_RESPONSE_BYTES == 8 * 1024 * 1024
+
+          fields = QgsFields()
+          fields.append(QgsField("label", QMetaType.Type.QString))
+          geojson = '''{
+            "type": "FeatureCollection",
+            "features": [{
+              "type": "Feature",
+              "properties": {"label": "Kabelgroup: TEST-01", "ignored": "x"},
+              "geometry": {"type": "LineString", "coordinates": [[100000, 400000], [100010, 400000]]}
+            }]
+          }'''
+          features = QgsJsonUtils.stringToFeatureList(geojson, fields)
+          assert len(features) == 1
+          assert features[0]["label"] == "Kabelgroup: TEST-01"
+          assert round(features[0].geometry().length(), 2) == 10.0
+          assert len(features[0].attributes()) == 1
 
           provider = EnexisKabelProvider()
           provider.loadAlgorithms()
           assert len(provider.algorithms()) == 1
 
           app.exitQgis()
-          print("QGIS 4.2 plugin smoke test OK")
+          print("QGIS 4.2 low-resource smoke test OK")
           PY
