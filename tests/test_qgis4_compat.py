@@ -30,7 +30,7 @@ class Qgis42CompatibilityTests(unittest.TestCase):
     def test_metadata_requires_qgis_42_and_v015(self):
         text = (ROOT / "metadata.txt").read_text(encoding="utf-8")
         self.assertIn("qgisMinimumVersion=4.2", text)
-        self.assertIn("version=0.15.0", text)
+        self.assertIn("version=0.15.1", text)
         self.assertIn("SHAPE Noord", text)
 
     def test_provider_uses_source_selecting_v015_algorithm(self):
