@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import hashlib
-import json
 import os
 import shutil
 import sqlite3
@@ -107,12 +106,20 @@ def open_existing(
         return None
 
 
-def _remove_sqlite_files(path):
-    for candidate in (path, path + "-wal", path + "-shm", path + "-journal"):
+def _remove_sidecars(path):
+    for candidate in (path + "-wal", path + "-shm", path + "-journal"):
         try:
             os.remove(candidate)
         except OSError:
             pass
+
+
+def _remove_all(path):
+    try:
+        os.remove(path)
+    except OSError:
+        pass
+    _remove_sidecars(path)
 
 
 class WfsIndexBuilder:
@@ -152,9 +159,7 @@ class WfsIndexBuilder:
             )
             """
         )
-        self.connection.execute(
-            "CREATE TABLE wfs_labels (label TEXT PRIMARY KEY)"
-        )
+        self.connection.execute("CREATE TABLE wfs_labels (label TEXT PRIMARY KEY)")
         self._base_meta = expected_meta(
             source_url, type_name, label_field, geometry_field, srs_name
         )
@@ -163,32 +168,28 @@ class WfsIndexBuilder:
     def insert_records(self, records):
         if not records:
             return 0
-        before = self.connection.total_changes
+        before_rows = self.connection.total_changes
         self.connection.executemany(
             "INSERT OR IGNORE INTO wfs_rows "
             "(source_key, source_fid, label, length_m, geometry_wkb) "
             "VALUES (?, ?, ?, ?, ?)",
             records,
         )
+        inserted_rows = self.connection.total_changes - before_rows
         self.connection.executemany(
             "INSERT OR IGNORE INTO wfs_labels(label) VALUES (?)",
             [(record[2],) for record in records if record[2]],
         )
-        changed = self.connection.total_changes - before
-        self.inserted_features += max(0, changed - len({r[2] for r in records if r[2]}))
-        return changed
+        self.inserted_features += inserted_rows
+        return inserted_rows
 
     def commit(self):
         self.connection.commit()
 
     def finalize(self, download_format, raw_feature_count, extra_meta=None):
         self.connection.execute("CREATE INDEX idx_wfs_rows_label ON wfs_rows(label)")
-        feature_count = self.connection.execute(
-            "SELECT COUNT(*) FROM wfs_rows"
-        ).fetchone()[0]
-        label_count = self.connection.execute(
-            "SELECT COUNT(*) FROM wfs_labels"
-        ).fetchone()[0]
+        feature_count = self.connection.execute("SELECT COUNT(*) FROM wfs_rows").fetchone()[0]
+        label_count = self.connection.execute("SELECT COUNT(*) FROM wfs_labels").fetchone()[0]
         meta = dict(self._base_meta)
         meta.update(
             {
@@ -209,7 +210,7 @@ class WfsIndexBuilder:
         self.connection.close()
         self.connection = None
 
-        _remove_sqlite_files(self.final_path)
+        _remove_sidecars(self.final_path)
         os.replace(self.temp_path, self.final_path)
         self.temp_path = ""
         connection = sqlite3.connect(self.final_path)
@@ -221,7 +222,7 @@ class WfsIndexBuilder:
             self.connection.close()
             self.connection = None
         if self.temp_path:
-            _remove_sqlite_files(self.temp_path)
+            _remove_all(self.temp_path)
             self.temp_path = ""
 
 
