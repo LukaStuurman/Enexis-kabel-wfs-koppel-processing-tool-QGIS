@@ -227,14 +227,21 @@ def extract_target_folder(archive_path, destination):
             raise ShapeArchiveError(
                 "Map '{0}' is niet gevonden in de Enexis ZIP.".format(TARGET_FOLDER)
             )
-        shape_files = discover_shape_files(build_target)
+        discover_shape_files(build_target)  # validate before replacing the good cache
         old_path = destination + ".old"
         shutil.rmtree(old_path, ignore_errors=True)
+        moved_old = False
         if os.path.exists(destination):
             os.replace(destination, old_path)
-        os.replace(build_target, destination)
+            moved_old = True
+        try:
+            os.replace(build_target, destination)
+        except Exception:
+            if moved_old and not os.path.exists(destination) and os.path.exists(old_path):
+                os.replace(old_path, destination)
+            raise
         shutil.rmtree(old_path, ignore_errors=True)
-        return shape_files
+        return discover_shape_files(destination)
     finally:
         shutil.rmtree(build_root, ignore_errors=True)
 
