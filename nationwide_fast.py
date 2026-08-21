@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import sqlite3
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
@@ -10,11 +11,13 @@ from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from qgis.core import QgsProcessingException, QgsVectorLayer
 
 from .matching import normalize_label
-from .nationwide import NationwideProcessor as BaseNationwideProcessor
+from .nationwide import NationwideProcessor as BaseNationwideProcessor, NationwideWfsError
 from .wfs_index import WfsIndexBuilder, WfsIndexError, tile_bounds
 
 
 class NationwideProcessor(BaseNationwideProcessor):
+    MIN_TILE_SIZE_M = 1000.0
+
     def _params(
         self,
         type_name,
@@ -24,9 +27,10 @@ class NationwideProcessor(BaseNationwideProcessor):
         start_index=0,
         output_format="application/json",
     ):
-        # WFS feature IDs are not guaranteed to be normal attributes. Request
-        # only the label + geometry; GeoJSON still supplies feature['id'] and
-        # GeoPackage can fall back to a stable label+geometry hash.
+        # No nationwide/tile offset pagination in the normal path. Dense tiles
+        # are spatially subdivided instead. WFS feature IDs are not requested as
+        # normal attributes; GeoJSON supplies feature['id'] and GeoPackage falls
+        # back to a stable label+geometry hash.
         params = {
             "service": "WFS",
             "version": "2.0.0",
@@ -38,16 +42,101 @@ class NationwideProcessor(BaseNationwideProcessor):
             "propertyName": ",".join(
                 (label_field, self.algorithm.GEOMETRY_FIELD)
             ),
-            "sortBy": "fid A",
         }
-        if start_index:
-            params["startIndex"] = str(start_index)
         if bbox is not None:
             _, xmin, ymin, xmax, ymax = bbox
             params["bbox"] = "{0},{1},{2},{3},{4}".format(
                 xmin, ymin, xmax, ymax, self.algorithm.RD_AUTHID
             )
         return params
+
+    @staticmethod
+    def _split_tile(tile):
+        tile_id, xmin, ymin, xmax, ymax = tile
+        midx = (xmin + xmax) / 2.0
+        midy = (ymin + ymax) / 2.0
+        return [
+            (str(tile_id) + ".1", xmin, ymin, midx, midy),
+            (str(tile_id) + ".2", midx, ymin, xmax, midy),
+            (str(tile_id) + ".3", xmin, midy, midx, ymax),
+            (str(tile_id) + ".4", midx, midy, xmax, ymax),
+        ]
+
+    def _download_tile(self, tile, type_name, label_field, download_format):
+        """Download one tile, recursively subdividing when it is too dense."""
+        pending_tiles = [tile]
+        paths = []
+        total_returned = 0
+        output_format = "geopkg" if download_format == "geopkg" else "application/json"
+        accept = (
+            "application/geopackage+sqlite3, application/octet-stream"
+            if download_format == "geopkg"
+            else "application/json"
+        )
+        try:
+            while pending_tiles:
+                if self.cancel_event.is_set():
+                    raise NationwideWfsError("Landelijke tegel-download geannuleerd.")
+                current = pending_tiles.pop()
+                _, xmin, ymin, xmax, ymax = current
+                params = self._params(
+                    type_name,
+                    label_field,
+                    self.TILE_PAGE_SIZE + 1,
+                    bbox=current,
+                    output_format=output_format,
+                )
+                try:
+                    data, _ = self._request_raw(
+                        params, self.MAX_TILE_PAGE_BYTES, accept
+                    )
+                except NationwideWfsError as exc:
+                    text = str(exc).lower()
+                    width = xmax - xmin
+                    height = ymax - ymin
+                    if (
+                        ("te groot" in text or "overschrijdt" in text)
+                        and max(width, height) > self.MIN_TILE_SIZE_M
+                    ):
+                        pending_tiles.extend(self._split_tile(current))
+                        continue
+                    raise
+
+                suffix = ".gpkg" if download_format == "geopkg" else ".json"
+                path = self._save_page(data, suffix)
+                if download_format == "geopkg":
+                    _, returned = self._gpkg_feature_table(path)
+                else:
+                    payload = json.loads(data.decode("utf-8-sig", errors="replace"))
+                    returned = len(payload.get("features") or [])
+
+                if returned > self.TILE_PAGE_SIZE:
+                    try:
+                        os.remove(path)
+                    except OSError:
+                        pass
+                    width = xmax - xmin
+                    height = ymax - ymin
+                    if max(width, height) <= self.MIN_TILE_SIZE_M:
+                        raise NationwideWfsError(
+                            "Meer dan {0} kabeldelen binnen een RD-tegel van ongeveer "
+                            "{1:.0f} m. De plugin stopt om stille WFS-truncatie te voorkomen."
+                            .format(self.TILE_PAGE_SIZE, max(width, height))
+                        )
+                    pending_tiles.extend(self._split_tile(current))
+                    continue
+
+                paths.append(path)
+                total_returned += returned
+
+            return tile, paths, total_returned
+        except Exception:
+            for path in paths:
+                try:
+                    os.remove(path)
+                except OSError:
+                    pass
+            raise
 
     def _records_from_gpkg(self, path, label_field):
         table_name, _ = self._gpkg_feature_table(path)
@@ -115,8 +204,9 @@ class NationwideProcessor(BaseNationwideProcessor):
         tile_iter = iter(tiles)
 
         self.feedback.pushInfo(
-            "Landelijke WFS-index: {0} RD-tegels van {1:.0f} km, maximaal {2} "
-            "gelijktijdige downloads, formaat {3}.".format(
+            "Landelijke WFS-index: {0} hoofdtegels van {1:.0f} km, maximaal {2} "
+            "gelijktijdige downloads, formaat {3}. Drukke tegels worden automatisch "
+            "ruimtelijk opgesplitst.".format(
                 total_tiles,
                 self.TILE_SIZE_M / 1000,
                 self.MAX_TILE_WORKERS,
@@ -177,7 +267,7 @@ class NationwideProcessor(BaseNationwideProcessor):
                     )
                     if completed_tiles % 10 == 0 or completed_tiles == total_tiles:
                         self.feedback.pushInfo(
-                            "WFS-index: {0}/{1} tegels, {2} ruwe objecten gezien, "
+                            "WFS-index: {0}/{1} hoofdtegels, {2} ruwe objecten gezien, "
                             "{3} unieke geldige kabels geïndexeerd.".format(
                                 completed_tiles,
                                 total_tiles,
@@ -211,6 +301,7 @@ class NationwideProcessor(BaseNationwideProcessor):
                     "tile_size_m": self.TILE_SIZE_M,
                     "tile_count": total_tiles,
                     "max_workers": self.MAX_TILE_WORKERS,
+                    "subdivision": "adaptive",
                 },
             )
         except Exception:
