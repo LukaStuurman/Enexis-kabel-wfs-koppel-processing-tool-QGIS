@@ -12,12 +12,11 @@ import zipfile
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
-# Direct target encoded inside the Outlook SafeLinks URL supplied by the user.
-# urllib follows the Spotler redirect to the actual Enexis ZIP download.
+# Current Enexis/Spotler SHAPE download link supplied by the user.
 SHAPE_DOWNLOAD_URL = (
     "https://c.spotler.com/ct/m3/k1/"
-    "zDkrvaR4UkZUZyp6o0PSGxC4POg_9FI_xOzxbTnHUkUOSc4Xm32CQ3aHE1Lap9i9IlF7UL41l2WC4TKuJ80SWVYkQMGB12sHBnd3zkU7ZjNlvep7JvCy3tYhHfegmveFxwBPEj5X-6YhopUbPEuiaB6TQDBwyR_h6ggPTk7WN9t1AvCgI5edyvEI25giBn_0-wfF62StKIegwpyE40Vi8w/"
-    "W4L6RuSXdp3sv7r"
+    "KdKQtH6B0wZjnPBT7BzqOtEsn-w1iebQF8ZDB2NGKTYcA4pq8agO-N_rqoymPoGmXmbyRWK5Y-t6tJGhGUv84awweWYQnJYsH5vDkKODg3_b1yt9gHlYGgO6bvmtvIKmr8wPsm5YhfVgEzVmNVPQ6wqVW49PJ4Twysgqdkc00ryGvq4cQnuanRps7J1UzY9JRCE_DjZR-FqZ7a2pj5ESEw/"
+    "ig3SD3vmbjdIP76"
 )
 TARGET_FOLDER = "imkl_elektriciteitskabel_e_lv_map_cable_ligging"
 ARCHIVE_NAME = "enexis_open_asset_shapes.zip"
