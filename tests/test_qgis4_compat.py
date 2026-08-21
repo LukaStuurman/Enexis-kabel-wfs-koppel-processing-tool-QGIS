@@ -27,10 +27,10 @@ class Qgis42CompatibilityTests(unittest.TestCase):
         self.assertNotIn("QgsWkbTypes.LineString", text)
         self.assertIn("Qgis.WkbType.MultiLineString", text)
 
-    def test_metadata_requires_qgis_42_and_v015(self):
+    def test_metadata_requires_qgis_42_and_v0152(self):
         text = (ROOT / "metadata.txt").read_text(encoding="utf-8")
         self.assertIn("qgisMinimumVersion=4.2", text)
-        self.assertIn("version=0.15.1", text)
+        self.assertIn("version=0.15.2", text)
         self.assertIn("SHAPE Noord", text)
 
     def test_provider_uses_source_selecting_v015_algorithm(self):
@@ -64,13 +64,15 @@ class Qgis42CompatibilityTests(unittest.TestCase):
         self.assertIn("defaultValue=3", text)
         self.assertIn("ShapeNationwideProcessor", text)
 
-    def test_shape_archive_uses_requested_imkl_folder(self):
+    def test_shape_archive_uses_requested_imkl_folder_and_direct_s3_zip(self):
         text = (ROOT / "shape_archive.py").read_text(encoding="utf-8")
         self.assertIn(
             'TARGET_FOLDER = "imkl_elektriciteitskabel_e_lv_map_cable_ligging"',
             text,
         )
-        self.assertIn("c.spotler.com/ct/", text)
+        self.assertIn("enxp433-opendata-publications.s3.eu-west-1.amazonaws.com", text)
+        self.assertIn("Open_Asset_Data_Elektra.zip", text)
+        self.assertNotIn('"https://c.spotler.com/ct/', text)
         self.assertIn("download_archive", text)
         self.assertIn("zipfile.is_zipfile", text)
         self.assertIn("discover_shape_files", text)
