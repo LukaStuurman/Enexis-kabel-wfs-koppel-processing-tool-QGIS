@@ -22,7 +22,11 @@ SHAPE_DOWNLOAD_URL = (
 TARGET_FOLDER = "imkl_elektriciteitskabel_e_lv_map_cable_ligging"
 DOWNLOAD_ID = hashlib.sha256(SHAPE_DOWNLOAD_URL.encode("utf-8")).hexdigest()[:12]
 ARCHIVE_NAME = "enexis_open_asset_shapes_{0}.zip".format(DOWNLOAD_ID)
-EXTRACTED_NAME = "enexis_open_asset_shapes_extracted_{0}".format(DOWNLOAD_ID)
+# Keep the extracted-cache leaf deliberately short. QGIS temporary output paths
+# can already be long on Windows, and the real SHAPE filenames are long too.
+EXTRACTED_NAME = "shape_{0}".format(DOWNLOAD_ID)
+EXTRACT_STAGE_PREFIX = "sx_"
+WINDOWS_SAFE_PATH_LIMIT = 240
 EDGE_HASH_BYTES = 64 * 1024
 DOWNLOAD_CHUNK_BYTES = 4 * 1024 * 1024
 HTTP_TIMEOUT_SECONDS = 90
@@ -201,12 +205,30 @@ def discover_shape_files(extracted_folder):
     return {"noord": north[0], "zuid": south[0]}
 
 
+def _copy_zip_member(archive, info, target):
+    try:
+        os.makedirs(os.path.dirname(target), exist_ok=True)
+        with archive.open(info, "r") as source, open(target, "wb") as output:
+            shutil.copyfileobj(source, output, DOWNLOAD_CHUNK_BYTES)
+    except OSError as exc:
+        if os.name == "nt" and len(os.path.abspath(target)) >= WINDOWS_SAFE_PATH_LIMIT:
+            raise ShapeArchiveError(
+                "Windows-pad voor de Enexis SHAPE-cache is te lang ({0} tekens). "
+                "Kies een kortere cachemap, bijvoorbeeld C:\\EnexisCache.".format(
+                    len(os.path.abspath(target))
+                )
+            ) from exc
+        raise
+
+
 def extract_target_folder(archive_path, destination):
     """Extract only the requested IMKL folder into an atomic cache directory."""
     parent = os.path.dirname(destination)
-    build_root = tempfile.mkdtemp(prefix="enexis_shape_extract_", dir=parent)
-    build_target = os.path.join(build_root, TARGET_FOLDER)
-    os.makedirs(build_target, exist_ok=True)
+    # Extract the files *directly* into a short staging directory. The previous
+    # layout nested TARGET_FOLDER below a long staging name, which pushed real
+    # Windows/QGIS temporary paths beyond MAX_PATH (e.g. 267 characters).
+    build_root = tempfile.mkdtemp(prefix=EXTRACT_STAGE_PREFIX, dir=parent)
+    build_target = build_root
     extracted_count = 0
     try:
         with zipfile.ZipFile(archive_path, "r") as archive:
@@ -220,9 +242,7 @@ def extract_target_folder(archive_path, destination):
                 root = os.path.abspath(build_target)
                 if os.path.commonpath((target, root)) != root:
                     raise ShapeArchiveError("Onveilige padnaam in de Enexis ZIP geweigerd.")
-                os.makedirs(os.path.dirname(target), exist_ok=True)
-                with archive.open(info, "r") as source, open(target, "wb") as output:
-                    shutil.copyfileobj(source, output, DOWNLOAD_CHUNK_BYTES)
+                _copy_zip_member(archive, info, target)
                 extracted_count += 1
 
         if extracted_count == 0:
