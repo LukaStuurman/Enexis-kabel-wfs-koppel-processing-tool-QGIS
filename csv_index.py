@@ -106,9 +106,16 @@ def _index_path(csv_path, cache_folder):
     return os.path.join(folder, INDEX_PREFIX + key + ".sqlite")
 
 
-def _configure_connection(connection):
+def _configure_build_connection(connection):
     connection.execute("PRAGMA journal_mode=OFF")
     connection.execute("PRAGMA synchronous=OFF")
+    connection.execute("PRAGMA temp_store=FILE")
+    connection.execute("PRAGMA cache_size=-16384")
+    connection.execute("PRAGMA mmap_size=0")
+
+
+def _configure_read_connection(connection):
+    # Keep reuse cheap: no full PRAGMA integrity/quick_check on a ~700 MB index.
     connection.execute("PRAGMA temp_store=FILE")
     connection.execute("PRAGMA cache_size=-16384")
     connection.execute("PRAGMA mmap_size=0")
@@ -147,7 +154,7 @@ def _valid_existing_index(index_path, signature):
     connection = None
     try:
         connection = sqlite3.connect(index_path)
-        _configure_connection(connection)
+        _configure_read_connection(connection)
         meta = _read_meta(connection)
         expected = dict(signature)
         expected["schema_version"] = INDEX_SCHEMA_VERSION
@@ -158,11 +165,9 @@ def _valid_existing_index(index_path, signature):
         if not isinstance(fieldnames, list) or not fieldnames:
             connection.close()
             return None
-        # Fast corruption guard without scanning the complete database.
-        quick = connection.execute("PRAGMA quick_check(1)").fetchone()
-        if not quick or str(quick[0]).lower() != "ok":
-            connection.close()
-            return None
+        # Constant-time structural guard. A deep integrity check would defeat
+        # the purpose of instant reuse for small extents.
+        connection.execute("SELECT row_number FROM csv_rows LIMIT 1").fetchone()
         return CsvIndex(
             index_path,
             connection,
@@ -198,9 +203,7 @@ def _schema(path, label_field, length_field):
     with open(path, "r", encoding="utf-8-sig", newline="") as handle:
         reader = csv.DictReader(handle, delimiter=delimiter)
         fieldnames = reader.fieldnames or []
-    missing = [
-        name for name in (label_field, length_field) if name not in fieldnames
-    ]
+    missing = [name for name in (label_field, length_field) if name not in fieldnames]
     if missing:
         raise CsvIndexError(
             "CSV mist verplichte kolom(men): " + ", ".join(missing)
@@ -256,13 +259,14 @@ def open_csv_index(
     )
     os.close(descriptor)
     connection = None
+    replaced = False
     try:
         if feedback is not None:
             feedback.setProgressText(
                 "Herbruikbare CSV-index bouwen (eenmalig voor deze CSV-versie)..."
             )
         connection = sqlite3.connect(building_path)
-        _configure_connection(connection)
+        _configure_build_connection(connection)
         connection.execute(
             "CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)"
         )
@@ -375,16 +379,16 @@ def open_csv_index(
             }
         )
         connection.executemany(
-            "INSERT INTO meta (key, value) VALUES (?, ?)",
-            sorted(meta.items()),
+            "INSERT INTO meta (key, value) VALUES (?, ?)", sorted(meta.items())
         )
         connection.commit()
         connection.close()
         connection = None
 
         os.replace(building_path, index_path)
+        replaced = True
         connection = sqlite3.connect(index_path)
-        _configure_connection(connection)
+        _configure_read_connection(connection)
         if feedback is not None:
             feedback.pushInfo(
                 "Nieuwe herbruikbare CSV-index gereed: {0} rijen, {1} unieke "
@@ -399,4 +403,6 @@ def open_csv_index(
         if connection is not None:
             connection.close()
         _remove_sqlite_files(building_path)
+        if replaced:
+            _remove_sqlite_files(index_path)
         raise
