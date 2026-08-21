@@ -19,8 +19,9 @@ SHAPE_DOWNLOAD_URL = (
     "ig3SD3vmbjdIP76"
 )
 TARGET_FOLDER = "imkl_elektriciteitskabel_e_lv_map_cable_ligging"
-ARCHIVE_NAME = "enexis_open_asset_shapes.zip"
-EXTRACTED_NAME = "enexis_open_asset_shapes_extracted"
+DOWNLOAD_ID = hashlib.sha256(SHAPE_DOWNLOAD_URL.encode("utf-8")).hexdigest()[:12]
+ARCHIVE_NAME = "enexis_open_asset_shapes_{0}.zip".format(DOWNLOAD_ID)
+EXTRACTED_NAME = "enexis_open_asset_shapes_extracted_{0}".format(DOWNLOAD_ID)
 EDGE_HASH_BYTES = 64 * 1024
 DOWNLOAD_CHUNK_BYTES = 4 * 1024 * 1024
 HTTP_TIMEOUT_SECONDS = 90
