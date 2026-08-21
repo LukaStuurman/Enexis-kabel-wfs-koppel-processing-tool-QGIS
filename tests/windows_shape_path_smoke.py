@@ -21,8 +21,19 @@ def write_shape_set(archive, folder, stem):
 
 with tempfile.TemporaryDirectory() as temp_dir:
     root = pathlib.Path(temp_dir)
-    # Mimic the depth of a QGIS Processing cache like the reported failure,
-    # while the fixed destination remains comfortably below 240 characters.
+
+    generated_cache = (
+        root
+        / ("processing_" + "a" * 12)
+        / ("b" * 32)
+        / "CACHE_FOLDER"
+    )
+    archive_cache, extracted_cache = shape_archive.archive_paths(str(generated_cache))
+    assert shape_archive.DEFAULT_CACHE_DIRNAME in archive_cache
+    assert "processing_" not in extracted_cache.casefold(), extracted_cache
+
+    # Independently verify that direct extraction also works when a caller gives
+    # a deep path of the same order as the reported QGIS failure.
     parent = root / ("processing_" + "a" * 24) / ("b" * 32) / "CACHE_FOLDER" / "enexis_shape_source"
     parent.mkdir(parents=True)
     destination = parent / shape_archive.EXTRACTED_NAME
