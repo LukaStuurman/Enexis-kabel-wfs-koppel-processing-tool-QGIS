@@ -1,11 +1,11 @@
 [general]
 name=Enexis Kabel WFS-CSV Koppeling
-description=QGIS 4.2 low-resource Processing-tool voor exacte Kabel Subgroep-koppeling, schermextent en begrensde directe WFS-opvraging.
-version=0.6.0
+description=QGIS 4.2 low-resource Processing-tool voor exacte Kabel Subgroep-koppeling, correcte ECQL-schermextent en begrensde directe WFS-opvraging.
+version=0.6.1
 qgisMinimumVersion=4.2
 author=LukaStuurman
 email=
-about=QGIS 4.2 low-resource tool: maximaal één WFS-request tegelijk, kleine batches en harde response/feature-limieten om hoge RAM- en CPU-belasting te voorkomen. Koppelt strikt 1-op-1 op Kabel Subgroep en lengte.
+about=QGIS 4.2 low-resource tool: één WFS-request tegelijk, kleine batches, harde RAM-limieten en één gecombineerd ECQL-filter voor label plus schermextent. Koppelt strikt 1-op-1 op Kabel Subgroep en lengte.
 category=Vector
 experimental=False
 deprecated=False
