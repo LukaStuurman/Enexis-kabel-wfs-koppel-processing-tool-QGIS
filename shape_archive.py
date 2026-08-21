@@ -26,6 +26,7 @@ ARCHIVE_NAME = "enexis_open_asset_shapes_{0}.zip".format(DOWNLOAD_ID)
 # can already be long on Windows, and the real SHAPE filenames are long too.
 EXTRACTED_NAME = "shape_{0}".format(DOWNLOAD_ID)
 EXTRACT_STAGE_PREFIX = "sx_"
+DEFAULT_CACHE_DIRNAME = "enexis_kabel_csv_cache"
 WINDOWS_SAFE_PATH_LIMIT = 240
 EDGE_HASH_BYTES = 64 * 1024
 DOWNLOAD_CHUNK_BYTES = 4 * 1024 * 1024
@@ -37,10 +38,27 @@ class ShapeArchiveError(RuntimeError):
     pass
 
 
+def _is_qgis_processing_temp_cache(path):
+    """Recognize QGIS' generated .../processing_x/.../CACHE_FOLDER path."""
+    normalized = str(path or "").replace("\\", "/").rstrip("/")
+    parts = [part for part in normalized.split("/") if part]
+    if not parts or parts[-1].casefold() != "cache_folder":
+        return False
+    return any(part.casefold().startswith("processing_") for part in parts[:-1])
+
+
 def cache_root(cache_folder):
     root = (cache_folder or "").strip()
-    if not root or root.upper() == "TEMPORARY_OUTPUT":
-        root = os.path.join(tempfile.gettempdir(), "enexis_kabel_csv_cache")
+    # QgsProcessingParameterFolderDestination may resolve its temporary default
+    # to a deep .../processing_x/<uuid>/CACHE_FOLDER directory. Treat that the
+    # same as TEMPORARY_OUTPUT so SHAPE data is reused across runs and Windows
+    # paths remain short.
+    if (
+        not root
+        or root.upper() == "TEMPORARY_OUTPUT"
+        or _is_qgis_processing_temp_cache(root)
+    ):
+        root = os.path.join(tempfile.gettempdir(), DEFAULT_CACHE_DIRNAME)
     root = os.path.join(root, "enexis_shape_source")
     os.makedirs(root, exist_ok=True)
     return root
