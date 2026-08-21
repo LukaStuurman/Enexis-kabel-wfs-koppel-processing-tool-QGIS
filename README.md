@@ -1,179 +1,87 @@
 # Enexis kabel WFS ↔ CSV koppeling voor QGIS 4.2
 
-QGIS Processing-plugin die Enexis `e_lv_map_cable`-kabellijnen **strikt 1-op-1** koppelt aan rijen uit een CSV-export.
+QGIS Processing-plugin die Enexis `e_lv_map_cable`-kabellijnen **strikt 1-op-1** koppelt aan rijen uit een CSV-export en gekoppelde kabels naar DXF kan exporteren.
 
-## Nieuw in v0.12.0: landelijke WFS-CSV-koppeling op schijf
+## v0.13.0: herbruikbare CSV-index en veiligere landelijke verwerking
 
-Laat **Beperk WFS tot scherm/gebied** leeg om heel Nederland te verwerken. De
-plugin gebruikt dan niet langer de oude route die alle volledige CSV-rijen in
-RAM hield en voor ieder groepje CSV-labels een aparte landelijke WFS-filter
-uitvoerde.
+De landelijke CSV wordt vanaf v0.13.0 niet meer bij iedere run opnieuw volledig geparset. De plugin bouwt één keer een herbruikbare SQLite-index op lokale schijf en controleert bij iedere volgende run of de bron-CSV nog dezelfde is.
 
-De landelijke route werkt nu als volgt:
+De index wordt ongeldig verklaard en automatisch opnieuw opgebouwd wanneer onder andere bestandsgrootte, wijzigingstijd of de hash van het begin/einde van de CSV verandert.
 
-1. de CSV wordt één keer naar een tijdelijke SQLite-index op een lokale schijf
-   gestreamd;
-2. de WFS wordt één keer paginagewijs in stabiele `fid`-volgorde gelezen, met
-   alleen `label`, `fid` en geometrie;
-3. alleen WFS-kabels waarvan het label ook in de CSV staat blijven in de
-   tijdelijke schijfcache;
-4. na de download worden CSV en WFS per maximaal 50 gezamenlijke labels vanaf
-   schijf geladen;
-5. binnen ieder label blijft de bestaande strikte 1-op-1 lengtematching gelden;
-6. gekoppelde lijnen en niet-gekoppelde CSV-rijen worden rechtstreeks naar de
-   gekozen uitvoer geschreven;
-7. de tijdelijke SQLite-cache wordt altijd gesloten en verwijderd.
+### Waarom dit vooral voor kleine extents helpt
 
-De WFS-pagina bevat maximaal 10.000 objecten en maximaal 64 MB. Tijdelijke
-netwerk- en serverfouten worden maximaal drie keer opnieuw geprobeerd.
+Bij een schermextent werkt de route nu als volgt:
 
-### Gemeten met de meegeleverde landelijke CSV
+1. de WFS levert binnen de extent alleen het labelattribuut;
+2. de plugin bepaalt de unieke genormaliseerde WFS-labels;
+3. alleen die labels worden via de SQLite-index uit de landelijke CSV gelezen;
+4. alleen labels die werkelijk in WFS én CSV voorkomen krijgen een geometrie-opvraag;
+5. daarna volgt de bestaande strikte 1-op-1 lengtematching.
 
-De CSV van 18 augustus 2026 is 504.444.333 bytes groot en bevat 1.992.366
-rijen en 666.693 geldige unieke labels. Het bouwen van de CSV-schijfindex duurde
-in de lokale QGIS 4.2-test circa 32 seconden. De index was 693 MB. Eén echte,
-stabiel gesorteerde WFS-pagina bevatte 10.000 van in totaal 1.990.383
-kabeldelen; 9.292 daarvan hadden een label dat ook in de CSV voorkwam. De
-gemeten piek van het volledige testproces was circa 316 MB RAM.
+Na de eerste indexbouw hoeft een kleine extent dus niet meer iedere keer circa twee miljoen CSV-regels te doorlopen.
 
-Voor een landelijke uitvoering:
+## CSV-index/cachemap
 
-- kies voor beide uitvoerlagen een **GeoPackage op lokale SSD**, geen tijdelijke
-  geheugenlaag;
-- kies bij **Landelijke modus: tijdelijke cachemap** eveneens een lokale SSD;
-- houd minimaal 5 GB vrije schijfruimte beschikbaar;
-- reken door de bijna twee miljoen WFS-geometrieën op tientallen minuten of
-  langer, afhankelijk van GeoServer en de verbinding.
+De Processing-tool heeft nu correct de parameter:
 
-## Nieuw in v0.11.0: landelijke DXF-streaming
+**CSV-index/cachemap op lokale SSD (aanbevolen; wordt hergebruikt)**
 
-Voor een export van heel Nederland heeft **Split gekoppelde kabels naar DXF
-(V6 - landelijk)** een aparte streamingmodus. Schakel **Landelijke
-streamingmodus** in om:
+Kies bij voorkeur een vaste map op een lokale SSD. Laat je het veld leeg, dan gebruikt de plugin een map onder de tijdelijke map van het besturingssysteem. Die kan door Windows worden opgeschoond, waardoor de index later opnieuw gebouwd moet worden.
 
-- alle kabels uit de invoerlaag zonder selectie of zoekradius te verwerken;
-- standaard alleen objecten met `match_status = GEKOPPELD` te exporteren;
-- alleen geometrie, `wfs_label_norm`, `csv_Type` en `match_status` bij de
-  bronprovider op te vragen;
-- iedere kabel direct naar DXF te schrijven, zonder landelijke
-  geometrieverzameling in RAM;
-- automatisch een nieuw bestand `Nederland_Kabels_0001.dxf`,
-  `Nederland_Kabels_0002.dxf`, enzovoort te starten;
-- het maximale aantal kabels per DXF-deel in te stellen (standaard 25.000).
+De herbruikbare index bevat:
 
-Lijnen samenvoegen wordt in de landelijke modus bewust overgeslagen. Dat zou
-alle geometrieën per laagnaam opnieuw in het geheugen moeten verzamelen en het
-belangrijkste schaalvoordeel tenietdoen. Kleuren worden met een stabiele hash
-per projectcode gekozen, zodat dezelfde projectcode in ieder DXF-deel dezelfde
-kleur houdt.
+- CSV-rijnummer;
+- genormaliseerde `Kabel Subgroep`;
+- geparste kaartlengte;
+- eventuele lengtefout;
+- de oorspronkelijke CSV-waarden voor de output;
+- een index op het genormaliseerde label.
 
-## Nieuw in v0.10.0: gekoppelde kabels naar DXF
+Run-specifieke velden zoals `matched` en `wfs_found` staan **niet** in de vaste index. Voor een landelijke run wordt eerst een tijdelijke werkkopie gemaakt. Alleen die werkkopie krijgt matchstatus en tijdelijke WFS-geometrieën. Daardoor kan een geannuleerde of mislukte run de herbruikbare CSV-index niet vervuilen.
 
-De plugin bevat nu naast de WFS-CSV-koppeling ook **Split gekoppelde kabels
-naar DXF (V6 - landelijk)**. Deze tool werkt rechtstreeks met de uitvoerlaag van de
-koppeltool:
-
-- standaard labelveld `wfs_label_norm`;
-- standaard kabeltypeveld `csv_Type`;
-- herkent een gekoppeld label zoals `BEK4020-04` en haalt daar projectcode
-  `BEK4020` uit;
-- ondersteunt als terugval ook oudere velden zoals `label`, `KabelType` en
-  labels met de prefix `Kabelgroup:`;
-- beperkt de scan tot de bounding box van de selectie plus een instelbare
-  zoekradius;
-- kan alles in één DXF schrijven of één DXF per projectcode maken.
-
-Gebruik: selecteer in `Gekoppelde Enexis WFS-lijnen` één of meer kabels en open
-**Processing → Toolbox → Enexis → Kabelkoppeling → Split gekoppelde kabels naar
-DXF (V6 - landelijk)**.
-
-## Gebruik v0.9.0
-
-Versie **0.9.0** houdt een landelijke CSV in extentmodus niet meer volledig in
-het geheugen. De tool scant eerst de WFS-labels in het kaartvenster en streamt
-daarna de CSV één keer. Alleen CSV-rijen met een label dat werkelijk in die
-extent voorkomt worden bewaard en eventueel als niet-gekoppeld uitgevoerd.
-Rijen voor de rest van Nederland komen in extentmodus dus niet meer in de
-uitvoer `Niet-gekoppelde CSV-rijen`.
-
-Hierdoor bepalen de omvang van de gekozen extent en het aantal relevante labels
-het geheugengebruik, niet langer het totale aantal landelijke CSV-rijen.
-
-## Eerdere verbetering in v0.8.0
-
-Versie **0.8.0** vervangt de oude extent-first aanpak waarbij eerst alle volledige kabelgeometrieën in het scherm werden opgehaald. Dat kon traag zijn en bovendien matches missen wanneer de extent meer kabeldelen bevatte dan de veiligheidslimiet.
-
-De nieuwe extentmodus werkt in twee stappen:
-
-1. de plugin vraagt binnen de gekozen schermextent **alleen het WFS-labelattribuut** op;
-2. die WFS-labels worden lokaal genormaliseerd en vergeleken met CSV `Kabel Subgroep`;
-3. alleen labels die zowel in de WFS-extent als in de CSV voorkomen krijgen daarna een geometrie-opvraag;
-4. alleen die relevante geometrieën worden lokaal opnieuw tot de gekozen extent beperkt;
-5. daarna volgt de strikte 1-op-1 lengtematching.
-
-Dus praktisch:
-
-**schermextent → alleen labels ophalen → labels met CSV kruisen → alleen relevante geometrie ophalen → 1-op-1 matchen**
-
-GeoServer ondersteunt `propertyName` in WFS GetFeature om een response tot één attribuut te beperken. Hierdoor hoeft de eerste extent-scan geen kabelgeometrieën of overige attributen te downloaden.
-
-## Waarom dit sneller moet zijn
-
-Een schermextent kan honderden of duizenden kabeldelen bevatten. In v0.7.0 werden daarvan volledige geometrieën opgehaald voordat bekend was of hun labels überhaupt in de CSV voorkwamen.
-
-In v0.8.0 is de eerste response veel kleiner:
-
-- maximaal één WFS-request tegelijk;
-- eerste extent-scan bevat alleen het gedetecteerde labelveld;
-- maximaal 10 overeenkomende kabelgroepen per geometrie-request;
-- geometrie wordt alleen voor daadwerkelijke WFS/CSV-labelovereenkomsten opgehaald;
-- geen live `QgsVectorLayer` WFS-provider;
-- geen parallelle HTTP-downloads;
-- ruwe batches worden na verwerking vrijgegeven.
-
-## Betere diagnose bij 0 matches
-
-De plugin gaat niet meer blind uit van een veld dat exact `label` heet.
-
-Eerst wordt één WFS-feature bekeken. Het labelveld wordt gedetecteerd op:
-
-- exacte veldnaam `label`;
-- een veldnaam die `label` bevat;
-- herkenbare kabelgroep-veldnamen;
-- als laatste fallback een propertywaarde die begint met `Kabelgroup:`.
-
-Bij **0 exacte labelovereenkomsten** schrijft het Processing-log voorbeelden van:
-
-- genormaliseerde WFS-labels uit de extent;
-- labels uit CSV `Kabel Subgroep`.
-
-Hiermee is direct zichtbaar of bijvoorbeeld de verkeerde WFS-property, een andere prefix of een andere labelnotatie wordt gebruikt.
-
-## Schermextent
+## Extentmodus
 
 Kies bij **Beperk WFS tot scherm/gebied** bij voorkeur **Use current map canvas extent**.
 
-De extent wordt naar **EPSG:28992 (RD New)** omgerekend en rechtstreeks als WFS `bbox` verstuurd.
+De extent wordt naar **EPSG:28992 (RD New)** omgerekend.
 
-Voor de labelscan worden maximaal **10.000 kabeldelen** geaccepteerd, omdat daar alleen één stringattribuut per feature wordt opgehaald. De labelresponse is daarnaast begrensd op **4 MB**. Wordt die grens geraakt, zoom dan verder in.
+De eerste WFS-opvraag bevat alleen het gedetecteerde labelveld en geen geometrie. Er worden maximaal 10.000 kabeldelen en maximaal 4 MB labeldata geaccepteerd. Daarna wordt alleen voor labels die ook in de CSV-index voorkomen geometrie opgehaald.
 
-## Geometrie-opvraag
-
-Na de labelscan wordt de doorsnede bepaald:
-
-`WFS-labels binnen extent ∩ CSV Kabel Subgroep`
-
-Alleen voor deze labels wordt geometrie opgevraagd. In extentmodus combineert de
-plugin de ruimtelijke begrenzing en het labelfilter in één CQL-expressie:
+De geometrie-opvraag combineert de ruimtelijke begrenzing en het labelfilter in één CQL-filter:
 
 `BBOX(geografischeligging, ...) AND label IN (...)`
 
-De Enexis GeoServer accepteert voor deze laag geen losse `bbox` en `cql_filter`
-in dezelfde request. De gecombineerde CQL-vorm voorkomt toch een landelijke
-labelscan. De geometry-response is begrensd op **8 MB** en maximaal **1.000
-features per batch**.
+Per geometriebatch worden maximaal 10 gezamenlijke labels, maximaal 1.000 features en maximaal 8 MB verwerkt.
 
-Omdat de tweede request op label werkt, wordt iedere teruggekomen geometrie lokaal opnieuw tegen de gekozen extent gecontroleerd. Een eventueel gelijk label elders kan daardoor niet in de match terechtkomen.
+## Landelijke modus
+
+Laat **Beperk WFS tot scherm/gebied** leeg om heel Nederland te verwerken.
+
+De landelijke route is:
+
+1. herbruikbare CSV-index openen of eenmalig bouwen;
+2. de vaste index naar een tijdelijke SQLite-werkkopie op dezelfde lokale schijf kopiëren;
+3. WFS één keer paginagewijs lezen in stabiele `fid`-volgorde;
+4. alleen WFS-kabels waarvan het label in de CSV-index staat in de werkkopie bewaren;
+5. maximaal 50 gezamenlijke labels tegelijk vanaf schijf laden;
+6. per label strikt 1-op-1 op lengte matchen;
+7. resultaten rechtstreeks naar de gekozen output schrijven;
+8. tijdelijke landelijke werkkopie verwijderen; de vaste CSV-index blijft bestaan.
+
+De WFS-paginagrootte is standaard 10.000 features en maximaal 64 MB. Bij een te grote pagina verlaagt de plugin de paginagrootte. Tijdelijke HTTP 429/5xx- en netwerkfouten worden maximaal drie keer opnieuw geprobeerd.
+
+### Belangrijke veiligheid
+
+Landelijke modus weigert nu `TEMPORARY_OUTPUT` en `memory:` voor beide grote outputs. Kies expliciet bestanden op lokale schijf, bij voorkeur GeoPackage. Zo kan QGIS niet alsnog miljoenen outputfeatures in RAM proberen te houden.
+
+Als Processing wordt geannuleerd tijdens WFS-download, matching of het schrijven van niet-gekoppelde rijen, stopt de plugin met een foutmelding. Een gedeeltelijke download wordt niet meer stil als een complete landelijke analyse behandeld.
+
+Voor een landelijke run:
+
+- gebruik een lokale SSD voor de CSV-index/cachemap;
+- gebruik GeoPackage-uitvoer op lokale SSD;
+- houd minimaal ongeveer 5 GB vrije ruimte beschikbaar naast de vaste CSV-index;
+- verwacht dat de bijna twee miljoen WFS-geometrieën de totale doorlooptijd bepalen.
 
 ## CSV
 
@@ -182,32 +90,34 @@ De CSV moet minimaal bevatten:
 - `Kabel Subgroep`
 - `Lengte [kaart] (m)`
 
-Lengtes als `195`, `16,5`, `196,11` en `196.11` worden ondersteund.
+Lengtes zoals `195`, `16,5`, `196,11` en `196.11` worden ondersteund.
 
 ## Koppelregels
 
 1. `Kabelgroup: WLR1760-03` wordt genormaliseerd naar `WLR1760-03`.
-2. Daarna moet het label **exact** gelijk zijn aan CSV `Kabel Subgroep`.
-3. De WFS-lengte wordt als kaartlengte in RD New berekend en op 2 decimalen afgerond.
-4. Binnen dezelfde exacte Kabel Subgroep wordt strikt 1-op-1 gematcht op de best passende lengte.
-5. Iedere WFS-lijn en iedere CSV-rij wordt maximaal één keer gebruikt.
-6. CSV-regels waarvoor binnen de gekozen extent geen gelijk label is gevonden krijgen `GEEN_MATCH_BINNEN_EXTENT`.
+2. Daarna moet de waarde exact gelijk zijn aan CSV `Kabel Subgroep`.
+3. WFS-lengte wordt in RD New in meters berekend en op twee decimalen afgerond.
+4. Binnen dezelfde exacte kabelgroep wordt strikt 1-op-1 gematcht.
+5. Bij dubbele labels wordt de totale absolute lengte-afwijking geminimaliseerd.
+6. Iedere WFS-lijn en iedere CSV-rij wordt maximaal één keer gebruikt.
 
-## Zonder extent
+## DXF
 
-Zonder extent worden de CSV-labels rechtstreeks in kleine WFS-geometriebatches opgevraagd. Voor normaal interactief gebruik wordt de schermextent aanbevolen.
+**Split gekoppelde kabels naar DXF (V6 - landelijk)** ondersteunt zowel selectie/zoekradius als landelijke streaming.
+
+In landelijke streamingmodus worden alleen benodigde attributen gelezen, geometrieën direct naar DXF geschreven en standaard na 25.000 kabels een nieuw DXF-deel gestart. Lijnen worden in deze modus bewust niet samengevoegd om het RAM-gebruik begrensd te houden.
 
 ## QGIS-versie
 
-De plugin is gericht op **QGIS 4.2.0 / Qt6** en gebruikt de QGIS 4 API.
+De plugin is gericht op **QGIS 4.2.0 / Qt6**.
 
 ## Installatie / testen
 
-1. Sluit QGIS als een oudere pluginversie eerder is vastgelopen.
+1. Sluit QGIS na een eerdere vastloper of crash.
 2. Start QGIS 4.2.0 opnieuw.
 3. Verwijder de oude pluginversie.
-4. Installeer de nieuwste repository-ZIP.
-5. Controleer dat **versie 0.12.0** actief is.
-6. Open **Processing → Toolbox → Enexis → Kabelkoppeling → Koppel Enexis WFS-kabels aan CSV (snelle extent-scan)**.
-7. Kies de CSV en **Use current map canvas extent**.
-8. Kijk bij een resultaat met 0 matches in het Processing-log naar `WFS-voorbeeld` en `CSV-voorbeeld`.
+4. Installeer de repository-ZIP van de gewenste versie.
+5. Controleer dat **versie 0.13.0** actief is.
+6. Kies een vaste lokale SSD-map voor **CSV-index/cachemap**.
+7. Test eerst een kleine schermextent.
+8. Controleer in het Processing-log `Extent-scan`, `CSV-index hergebruikt/nieuw gebouwd`, het aantal gezamenlijke labels en het aantal koppelingen.

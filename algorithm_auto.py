@@ -1,9 +1,8 @@
 # -*- coding: utf-8 -*-
-"""Two-stage, low-resource Enexis WFS/CSV matcher for QGIS 4.2."""
+"""Low-resource Enexis WFS/CSV matcher for QGIS 4.2."""
 
 from __future__ import annotations
 
-import csv
 import gc
 import json
 import os
@@ -26,6 +25,7 @@ from qgis.core import (
     QgsFields,
     QgsGeometry,
     QgsJsonUtils,
+    QgsProcessing,
     QgsProcessingException,
     QgsProcessingParameterExtent,
     QgsProcessingParameterFeatureSink,
@@ -34,7 +34,8 @@ from qgis.core import (
 )
 
 from .algorithm import FILE_BEHAVIOR, KoppelWfsCsvAlgorithm, NO_GEOMETRY
-from .matching import normalize_label, optimal_one_to_one, parse_decimal
+from .csv_index import CsvIndexError, open_csv_index
+from .matching import normalize_label, optimal_one_to_one
 
 
 class DirectWfsError(RuntimeError):
@@ -42,7 +43,7 @@ class DirectWfsError(RuntimeError):
 
 
 class KoppelWfsCsvAutoAlgorithm(KoppelWfsCsvAlgorithm):
-    """First scan labels in the extent, then fetch geometry only for CSV matches."""
+    """Extent matching plus a bounded nationwide disk-backed workflow."""
 
     WFS_URL = "https://opendata.enexis.nl/geoserver/wfs"
     TYPE_HINT = "e_lv_map_cable"
@@ -52,8 +53,7 @@ class KoppelWfsCsvAutoAlgorithm(KoppelWfsCsvAlgorithm):
     RD_EPSG = 28992
     RD_AUTHID = "EPSG:28992"
 
-    # The extent scan contains only one string attribute per feature, so it can
-    # safely inspect far more features than the old full-geometry extent query.
+    # Extent scan: labels only, no geometries.
     MAX_EXTENT_LABEL_FEATURES = 10000
     MAX_LABEL_SCAN_BYTES = 4 * 1024 * 1024
 
@@ -62,8 +62,7 @@ class KoppelWfsCsvAutoAlgorithm(KoppelWfsCsvAlgorithm):
     MAX_GEOMETRY_FEATURES_PER_BATCH = 1000
     MAX_GEOMETRY_RESPONSE_BYTES = 8 * 1024 * 1024
 
-    # Nationwide mode downloads the WFS exactly once in stable fid order,
-    # keeping one page in memory and all cross-page matching state on disk.
+    # Nationwide mode reads WFS once in stable fid order and keeps one page in RAM.
     NATIONWIDE_WFS_PAGE_SIZE = 10000
     MAX_NATIONWIDE_PAGE_BYTES = 64 * 1024 * 1024
     NATIONWIDE_MATCH_LABEL_BATCH = 50
@@ -84,12 +83,12 @@ class KoppelWfsCsvAutoAlgorithm(KoppelWfsCsvAlgorithm):
 
     def shortHelpString(self):
         return self.tr(
-            "Met een extent doet de tool eerst een lichte WFS-labelscan. Zonder "
-            "extent gebruikt de tool de landelijke modus: de CSV wordt naar een "
-            "tijdelijke SQLite-index op schijf gestreamd en daarna per kleine "
-            "labelbatch gekoppeld. Daardoor worden niet alle CSV-kolommen en "
-            "geometrieën tegelijk in RAM gehouden. Kies voor landelijke uitvoer "
-            "GeoPackage-bestanden in plaats van tijdelijke geheugenlagen."
+            "Met een extent doet de tool eerst een lichte WFS-labelscan en haalt "
+            "daarna alleen CSV-rijen voor labels in het kaartvenster uit een "
+            "herbruikbare SQLite-index. Zonder extent gebruikt de tool een landelijke "
+            "schijfmodus. De CSV-index wordt alleen opnieuw opgebouwd als de CSV "
+            "verandert. Kies een vaste cachemap op een lokale SSD en gebruik voor "
+            "landelijke uitvoer expliciete bestanden op schijf, bij voorkeur GeoPackage."
         )
 
     def createInstance(self):
@@ -108,6 +107,15 @@ class KoppelWfsCsvAutoAlgorithm(KoppelWfsCsvAlgorithm):
             QgsProcessingParameterExtent(
                 self.EXTENT,
                 self.tr("Beperk WFS tot scherm/gebied (aanbevolen)"),
+                optional=True,
+            )
+        )
+        self.addParameter(
+            QgsProcessingParameterFolderDestination(
+                self.CACHE_FOLDER,
+                self.tr(
+                    "CSV-index/cachemap op lokale SSD (aanbevolen; wordt hergebruikt)"
+                ),
                 optional=True,
             )
         )
@@ -134,6 +142,11 @@ class KoppelWfsCsvAutoAlgorithm(KoppelWfsCsvAlgorithm):
             settings.setValue(key, value)
         else:
             settings.remove(key)
+
+    @staticmethod
+    def _cancel_if_requested(feedback, message="Verwerking geannuleerd."):
+        if feedback.isCanceled():
+            raise QgsProcessingException(message)
 
     @staticmethod
     def _read_bounded(response, limit):
@@ -286,9 +299,6 @@ class KoppelWfsCsvAutoAlgorithm(KoppelWfsCsvAlgorithm):
             compact = key.lower().replace("_", "").replace("-", "")
             if compact in ("kabelgroep", "kabelgroup", "cablegroup"):
                 return key
-
-        # Last-resort content detection. This catches schemas where the field
-        # has an unexpected name but stores the known WFS text format.
         for key, value in properties.items():
             text = str(value or "").strip().lower()
             if text.startswith("kabelgroup:"):
@@ -326,15 +336,16 @@ class KoppelWfsCsvAutoAlgorithm(KoppelWfsCsvAlgorithm):
                 "Geen WFS-labelveld gevonden. Beschikbare properties: "
                 + ", ".join(property_names)
             )
+        if not label_field:
+            raise QgsProcessingException(
+                "Het WFS-labelveld kon niet worden bepaald."
+            )
         return type_name, label_field
 
     def _fetch_extent_labels(self, type_name, label_field, extent):
-        if not label_field:
-            return set(), 0
         params = self._getfeature_params(
             type_name, self.MAX_EXTENT_LABEL_FEATURES + 1, extent
         )
-        # This is the core speed improvement: no geometry and no other attributes.
         params["propertyName"] = label_field
         payload = self._request_json(params, self.MAX_LABEL_SCAN_BYTES)
         features = payload.get("features") or []
@@ -349,8 +360,7 @@ class KoppelWfsCsvAutoAlgorithm(KoppelWfsCsvAlgorithm):
         labels = set()
         for feature in features:
             properties = feature.get("properties") or {}
-            value = self._property_value(properties, label_field)
-            label = normalize_label(value)
+            label = normalize_label(self._property_value(properties, label_field))
             if label:
                 labels.add(label)
         return labels, len(features)
@@ -370,9 +380,6 @@ class KoppelWfsCsvAutoAlgorithm(KoppelWfsCsvAlgorithm):
         return "{0} IN ({1})".format(label_field, quoted)
 
     def _extent_label_filter(self, label_field, labels, extent):
-        # This GeoServer rejects separate bbox + cql_filter parameters. Put the
-        # spatial predicate inside CQL so it can use the spatial index and avoid
-        # a nationwide label scan for a tiny canvas extent.
         spatial = "BBOX({0},{1},{2},{3},{4},'{5}')".format(
             self.GEOMETRY_FIELD,
             extent.xMinimum(),
@@ -420,8 +427,6 @@ class KoppelWfsCsvAutoAlgorithm(KoppelWfsCsvAlgorithm):
                     json.dumps(geometry_json, separators=(",", ":"))
                 )
 
-            # The geometry request is label-based (not bbox-based). Restrict it
-            # locally again so a duplicated label elsewhere cannot enter a match.
             if (
                 extent is not None
                 and geometry is not None
@@ -438,133 +443,75 @@ class KoppelWfsCsvAutoAlgorithm(KoppelWfsCsvAlgorithm):
             records.append((geometry, label, length_m))
         return records
 
-    def _build_nationwide_cache(
-        self, csv_path, cache_folder, feedback
-    ):
-        """Stream a large CSV into a compact, disk-backed label index."""
-        delimiter, fieldnames = self._csv_schema(csv_path)
-        target_folder = (cache_folder or tempfile.gettempdir()).strip()
-        os.makedirs(target_folder, exist_ok=True)
+    @staticmethod
+    def _configure_working_connection(connection):
+        connection.execute("PRAGMA journal_mode=OFF")
+        connection.execute("PRAGMA synchronous=OFF")
+        connection.execute("PRAGMA temp_store=FILE")
+        connection.execute("PRAGMA cache_size=-16384")
+        connection.execute("PRAGMA mmap_size=0")
 
-        csv_size = os.path.getsize(csv_path)
+    def _open_csv_index(self, csv_path, cache_folder, feedback):
+        try:
+            return open_csv_index(
+                csv_path,
+                cache_folder,
+                self.CSV_LABEL_FIELD,
+                self.CSV_LENGTH_FIELD,
+                feedback=feedback,
+            )
+        except CsvIndexError as exc:
+            raise QgsProcessingException(str(exc)) from exc
+
+    def _prepare_nationwide_cache(self, csv_path, cache_folder, feedback):
+        """Copy the immutable reusable CSV index to a temporary run database."""
+        csv_index = self._open_csv_index(csv_path, cache_folder, feedback)
+        index_path = csv_index.path
+        fieldnames = list(csv_index.fieldnames)
+        stats = dict(csv_index.stats)
+        reused = csv_index.reused
+        csv_index.close()
+
+        target_folder = os.path.dirname(index_path)
+        index_bytes = os.path.getsize(index_path)
         free_bytes = shutil.disk_usage(target_folder).free
-        # The cache contains the CSV index and the relevant nationwide WFS
-        # geometries. Keep a conservative margin for SQLite index creation.
-        required_bytes = max(5 * 1024 * 1024 * 1024, csv_size * 8)
+        required_bytes = max(5 * 1024 * 1024 * 1024, index_bytes * 4)
         if free_bytes < required_bytes:
             raise QgsProcessingException(
-                "Onvoldoende vrije ruimte in de cachemap. Voor deze CSV is "
-                "minimaal {0:.1f} GB vrij aanbevolen; beschikbaar is {1:.1f} "
-                "GB.".format(required_bytes / 1073741824, free_bytes / 1073741824)
+                "Onvoldoende vrije ruimte voor de landelijke werkkopie en WFS-cache. "
+                "Minimaal {0:.1f} GB vrij aanbevolen; beschikbaar is {1:.1f} GB.".format(
+                    required_bytes / 1073741824, free_bytes / 1073741824
+                )
             )
 
-        file_descriptor, cache_path = tempfile.mkstemp(
-            prefix="enexis_landelijk_", suffix=".sqlite", dir=target_folder
+        descriptor, cache_path = tempfile.mkstemp(
+            prefix="enexis_landelijk_run_", suffix=".sqlite", dir=target_folder
         )
-        os.close(file_descriptor)
+        os.close(descriptor)
         connection = None
         try:
+            feedback.setProgressText("Herbruikbare CSV-index naar werkkopie kopiëren...")
+            shutil.copy2(index_path, cache_path)
             connection = sqlite3.connect(cache_path)
-            connection.execute("PRAGMA journal_mode=OFF")
-            connection.execute("PRAGMA synchronous=OFF")
-            connection.execute("PRAGMA temp_store=FILE")
-            connection.execute("PRAGMA cache_size=-16384")
-            connection.execute("PRAGMA mmap_size=0")
+            self._configure_working_connection(connection)
             connection.execute(
-                """
-                CREATE TABLE csv_rows (
-                    row_number INTEGER PRIMARY KEY,
-                    label TEXT NOT NULL,
-                    length_m REAL,
-                    length_error TEXT NOT NULL,
-                    values_json TEXT NOT NULL,
-                    matched INTEGER NOT NULL DEFAULT 0,
-                    wfs_found INTEGER NOT NULL DEFAULT 0
-                )
-                """
+                "ALTER TABLE csv_rows ADD COLUMN matched INTEGER NOT NULL DEFAULT 0"
             )
-
-            insert_sql = (
-                "INSERT INTO csv_rows "
-                "(row_number, label, length_m, length_error, values_json) "
-                "VALUES (?, ?, ?, ?, ?)"
-            )
-            pending = []
-            total_rows = 0
-            invalid_lengths = 0
-            empty_labels = 0
-            sample_labels = set()
-
-            with open(csv_path, "r", encoding="utf-8-sig", newline="") as handle:
-                reader = csv.DictReader(handle, delimiter=delimiter)
-                for row_number, row in enumerate(reader, start=2):
-                    if feedback.isCanceled():
-                        raise QgsProcessingException("Landelijke koppeling geannuleerd.")
-
-                    total_rows += 1
-                    label = normalize_label(row.get(self.CSV_LABEL_FIELD))
-                    if not label:
-                        empty_labels += 1
-                    elif len(sample_labels) < 12:
-                        sample_labels.add(label)
-
-                    raw_length = row.get(self.CSV_LENGTH_FIELD)
-                    try:
-                        length_m = round(parse_decimal(raw_length), 2)
-                        length_error = ""
-                    except (TypeError, ValueError):
-                        length_m = None
-                        length_error = "ONGELDIGE_CSV_LENGTE"
-                        invalid_lengths += 1
-
-                    values = [(row.get(name) or "") for name in fieldnames]
-                    values_json = json.dumps(
-                        values, ensure_ascii=False, separators=(",", ":")
-                    )
-                    pending.append(
-                        (
-                            row_number,
-                            label,
-                            length_m,
-                            length_error,
-                            values_json,
-                        )
-                    )
-                    if len(pending) >= 2000:
-                        connection.executemany(insert_sql, pending)
-                        pending.clear()
-
-                    if total_rows % 100000 == 0:
-                        connection.commit()
-                        feedback.pushInfo(
-                            "Landelijke CSV-index: {0} rijen naar schijf "
-                            "gestreamd...".format(total_rows)
-                        )
-
-            if pending:
-                connection.executemany(insert_sql, pending)
-                pending.clear()
-            connection.commit()
-            feedback.setProgressText("Landelijke labelindex opbouwen...")
             connection.execute(
-                "CREATE INDEX idx_csv_rows_label ON csv_rows(label)"
+                "ALTER TABLE csv_rows ADD COLUMN wfs_found INTEGER NOT NULL DEFAULT 0"
             )
             connection.execute(
                 "CREATE INDEX idx_csv_rows_matched ON csv_rows(matched, row_number)"
             )
             connection.commit()
-            valid_unique_labels = connection.execute(
-                "SELECT COUNT(DISTINCT label) FROM csv_rows "
-                "WHERE label <> '' AND length_m IS NOT NULL"
-            ).fetchone()[0]
-            stats = {
-                "total_rows": total_rows,
-                "valid_unique_labels": valid_unique_labels,
-                "invalid_lengths": invalid_lengths,
-                "empty_labels": empty_labels,
-                "sample_labels": sorted(sample_labels),
-            }
-            return connection, cache_path, fieldnames, stats
+            return (
+                connection,
+                cache_path,
+                fieldnames,
+                stats,
+                index_path,
+                reused,
+            )
         except Exception:
             if connection is not None:
                 connection.close()
@@ -573,16 +520,6 @@ class KoppelWfsCsvAutoAlgorithm(KoppelWfsCsvAlgorithm):
             except OSError:
                 pass
             raise
-
-    @staticmethod
-    def _next_cached_label_batch(connection, last_label, batch_size):
-        rows = connection.execute(
-            "SELECT DISTINCT label FROM csv_rows "
-            "WHERE label <> '' AND length_m IS NOT NULL AND label > ? "
-            "ORDER BY label LIMIT ?",
-            (last_label, batch_size),
-        ).fetchall()
-        return [row[0] for row in rows]
 
     @staticmethod
     def _existing_cached_labels(connection, labels, chunk_size=400):
@@ -594,26 +531,20 @@ class KoppelWfsCsvAutoAlgorithm(KoppelWfsCsvAlgorithm):
             query = (
                 "SELECT DISTINCT label FROM csv_rows WHERE label IN ({0})"
             ).format(placeholders)
-            existing.update(
-                row[0] for row in connection.execute(query, chunk)
-            )
+            existing.update(row[0] for row in connection.execute(query, chunk))
         return existing
 
     def _fetch_nationwide_geometry_page(
         self, type_name, label_field, start_index, page_size=None
     ):
         page_size = page_size or self.NATIONWIDE_WFS_PAGE_SIZE
-        params = self._getfeature_params(
-            type_name, page_size
-        )
+        params = self._getfeature_params(type_name, page_size)
         params["startIndex"] = str(start_index)
         params["sortBy"] = "fid A"
         params["propertyName"] = ",".join(
             (label_field, "fid", self.GEOMETRY_FIELD)
         )
-        payload = self._request_json(
-            params, self.MAX_NATIONWIDE_PAGE_BYTES
-        )
+        payload = self._request_json(params, self.MAX_NATIONWIDE_PAGE_BYTES)
         features = payload.get("features") or []
         raw_total = payload.get("numberMatched")
         try:
@@ -624,9 +555,7 @@ class KoppelWfsCsvAutoAlgorithm(KoppelWfsCsvAlgorithm):
         records = []
         for offset, feature in enumerate(features):
             properties = feature.get("properties") or {}
-            label = normalize_label(
-                self._property_value(properties, label_field)
-            )
+            label = normalize_label(self._property_value(properties, label_field))
             source_fid = str(
                 properties.get("fid")
                 or feature.get("id")
@@ -673,11 +602,15 @@ class KoppelWfsCsvAutoAlgorithm(KoppelWfsCsvAlgorithm):
         page_number = 0
         page_size = self.NATIONWIDE_WFS_PAGE_SIZE
 
-        while not feedback.isCanceled():
+        while True:
+            self._cancel_if_requested(
+                feedback, "Landelijke WFS-download geannuleerd; er wordt geen gedeeltelijk resultaat gemaakt."
+            )
             page_number += 1
             feedback.setProgressText(
-                "Landelijke WFS-geometriepagina {0} ophalen vanaf object "
-                "{1}...".format(page_number, start_index)
+                "Landelijke WFS-geometriepagina {0} ophalen vanaf object {1}...".format(
+                    page_number, start_index
+                )
             )
             try:
                 records, returned_count, reported_total = (
@@ -692,10 +625,8 @@ class KoppelWfsCsvAutoAlgorithm(KoppelWfsCsvAlgorithm):
                     page_size = max(1000, page_size // 2)
                     page_number -= 1
                     feedback.pushInfo(
-                        "WFS-pagina was te groot; paginagrootte verlaagd naar "
-                        "{0} en dezelfde positie wordt opnieuw geprobeerd.".format(
-                            page_size
-                        )
+                        "WFS-pagina was te groot; paginagrootte verlaagd naar {0} en "
+                        "dezelfde positie wordt opnieuw geprobeerd.".format(page_size)
                     )
                     continue
                 raise
@@ -712,9 +643,7 @@ class KoppelWfsCsvAutoAlgorithm(KoppelWfsCsvAlgorithm):
                     source_fid,
                     label,
                     length_m,
-                    sqlite3.Binary(geometry_wkb)
-                    if geometry_wkb is not None
-                    else None,
+                    sqlite3.Binary(geometry_wkb) if geometry_wkb is not None else None,
                 )
                 for source_fid, label, length_m, geometry_wkb in records
                 if label in existing_labels
@@ -727,8 +656,8 @@ class KoppelWfsCsvAutoAlgorithm(KoppelWfsCsvAlgorithm):
             retained_features += len(retained)
             start_index += returned_count
             feedback.pushInfo(
-                "Landelijke WFS: {0}/{1} objecten gedownload; {2} objecten "
-                "hebben een label dat ook in de CSV staat.".format(
+                "Landelijke WFS: {0}/{1} objecten gedownload; {2} objecten hebben "
+                "een label dat ook in de CSV staat.".format(
                     downloaded_features,
                     total_matched if total_matched is not None else "?",
                     retained_features,
@@ -736,8 +665,7 @@ class KoppelWfsCsvAutoAlgorithm(KoppelWfsCsvAlgorithm):
             )
             if total_matched:
                 feedback.setProgress(
-                    15.0
-                    + 40.0 * downloaded_features / max(1, total_matched)
+                    15.0 + 40.0 * downloaded_features / max(1, total_matched)
                 )
 
             del records, retained, existing_labels
@@ -747,9 +675,10 @@ class KoppelWfsCsvAutoAlgorithm(KoppelWfsCsvAlgorithm):
             if total_matched is not None and start_index >= total_matched:
                 break
 
-        connection.execute(
-            "CREATE INDEX idx_wfs_rows_label ON wfs_rows(label)"
+        self._cancel_if_requested(
+            feedback, "Landelijke WFS-download geannuleerd; er wordt geen gedeeltelijk resultaat gemaakt."
         )
+        connection.execute("CREATE INDEX idx_wfs_rows_label ON wfs_rows(label)")
         connection.execute(
             "UPDATE csv_rows SET wfs_found=1 WHERE label IN "
             "(SELECT DISTINCT label FROM wfs_rows)"
@@ -814,12 +743,7 @@ class KoppelWfsCsvAutoAlgorithm(KoppelWfsCsvAlgorithm):
         return rows, groups
 
     @staticmethod
-    def _mark_cached_batch(connection, wfs_labels, matched_row_numbers):
-        if wfs_labels:
-            connection.executemany(
-                "UPDATE csv_rows SET wfs_found=1 WHERE label=?",
-                [(label,) for label in wfs_labels],
-            )
+    def _mark_cached_batch(connection, matched_row_numbers):
         if matched_row_numbers:
             connection.executemany(
                 "UPDATE csv_rows SET matched=1 WHERE row_number=?",
@@ -842,16 +766,10 @@ class KoppelWfsCsvAutoAlgorithm(KoppelWfsCsvAlgorithm):
             "SELECT row_number, label, length_m, length_error, values_json, "
             "wfs_found FROM csv_rows WHERE matched=0 ORDER BY row_number"
         )
-        for (
-            row_number,
-            label,
-            length_m,
-            length_error,
-            values_json,
-            wfs_found,
-        ) in cursor:
-            if feedback.isCanceled():
-                break
+        for row_number, label, length_m, length_error, values_json, wfs_found in cursor:
+            self._cancel_if_requested(
+                feedback, "Schrijven van niet-gekoppelde CSV-rijen geannuleerd; gedeeltelijke uitvoer is ongeldig."
+            )
             if not label:
                 reason = "LEGE_KABEL_SUBGROEP"
             elif length_error:
@@ -869,8 +787,9 @@ class KoppelWfsCsvAutoAlgorithm(KoppelWfsCsvAlgorithm):
             written += 1
             if written % 100000 == 0:
                 feedback.pushInfo(
-                    "Niet-gekoppelde landelijke CSV-rijen geschreven: "
-                    "{0}/{1}...".format(written, total)
+                    "Niet-gekoppelde landelijke CSV-rijen geschreven: {0}/{1}...".format(
+                        written, total
+                    )
                 )
                 feedback.setProgress(90.0 + 10.0 * written / max(1, total))
         return written
@@ -938,6 +857,38 @@ class KoppelWfsCsvAutoAlgorithm(KoppelWfsCsvAlgorithm):
             sink.addFeature(out, QgsFeatureSink.Flag.FastInsert)
         return len(records), len(matches), set(matches.values())
 
+    @staticmethod
+    def _destination_text(value):
+        if value is None:
+            return ""
+        sink = getattr(value, "sink", None)
+        if sink is not None:
+            try:
+                value = sink() if callable(sink) else sink
+            except Exception:
+                pass
+        return str(value or "").strip()
+
+    def _require_nationwide_disk_outputs(self, parameters):
+        for key, label in (
+            (self.OUTPUT, "Gekoppelde Enexis WFS-lijnen"),
+            (self.UNMATCHED_CSV, "Niet-gekoppelde CSV-rijen"),
+        ):
+            raw = parameters.get(key)
+            text = self._destination_text(raw)
+            if (
+                raw == QgsProcessing.TEMPORARY_OUTPUT
+                or not text
+                or text.upper() == "TEMPORARY_OUTPUT"
+                or text.lower().startswith("memory:")
+            ):
+                raise QgsProcessingException(
+                    "Landelijke modus weigert tijdelijke/geheugenuitvoer voor '{0}'. "
+                    "Kies expliciet een bestand op lokale schijf, bij voorkeur een "
+                    "GeoPackage (.gpkg), zodat miljoenen objecten QGIS niet uit het "
+                    "geheugen drukken.".format(label)
+                )
+
     def _process_nationwide(
         self,
         parameters,
@@ -948,17 +899,16 @@ class KoppelWfsCsvAutoAlgorithm(KoppelWfsCsvAlgorithm):
         cache_folder,
         total_started,
     ):
-        """Match a nationwide CSV using a bounded disk-backed working set."""
+        """Match a nationwide CSV using a reusable index and bounded working copy."""
+        self._require_nationwide_disk_outputs(parameters)
         feedback.pushInfo(
-            "Geen extent gekozen: landelijke schijfmodus wordt gebruikt. "
-            "Gebruik GeoPackage-uitvoer in plaats van tijdelijke geheugenlagen."
+            "Geen extent gekozen: landelijke schijfmodus wordt gebruikt. De "
+            "herbruikbare CSV-index blijft op schijf; alleen de WFS-werkkopie is tijdelijk."
         )
 
         schema_started = time.perf_counter()
         try:
-            type_name, label_field = self._resolve_type_and_label_field(
-                None, feedback
-            )
+            type_name, label_field = self._resolve_type_and_label_field(None, feedback)
         except DirectWfsError as exc:
             raise QgsProcessingException(str(exc)) from exc
         schema_seconds = time.perf_counter() - schema_started
@@ -966,26 +916,25 @@ class KoppelWfsCsvAutoAlgorithm(KoppelWfsCsvAlgorithm):
         connection = None
         cache_path = ""
         try:
-            feedback.setProgressText(
-                "Landelijke CSV naar tijdelijke schijfindex streamen..."
-            )
+            feedback.setProgressText("Herbruikbare CSV-index openen of opbouwen...")
             csv_started = time.perf_counter()
-            connection, cache_path, csv_fieldnames, csv_stats = (
-                self._build_nationwide_cache(
-                    csv_path, cache_folder, feedback
-                )
-            )
+            (
+                connection,
+                cache_path,
+                csv_fieldnames,
+                csv_stats,
+                index_path,
+                index_reused,
+            ) = self._prepare_nationwide_cache(csv_path, cache_folder, feedback)
             csv_seconds = time.perf_counter() - csv_started
-            cache_bytes = os.path.getsize(cache_path)
             feedback.pushInfo(
-                "Landelijke CSV-index: {0} rijen, {1} geldige unieke labels, "
-                "{2} lege labels, {3} ongeldige lengtes; schijfcache {4:.1f} "
-                "MB.".format(
+                "CSV-index {0}: {1} rijen, {2} geldige unieke labels; vaste index "
+                "{3:.1f} MB, landelijke werkkopie {4:.1f} MB.".format(
+                    "hergebruikt" if index_reused else "nieuw gebouwd",
                     csv_stats["total_rows"],
                     csv_stats["valid_unique_labels"],
-                    csv_stats["empty_labels"],
-                    csv_stats["invalid_lengths"],
-                    cache_bytes / 1048576,
+                    os.path.getsize(index_path) / 1048576,
+                    os.path.getsize(cache_path) / 1048576,
                 )
             )
 
@@ -1036,8 +985,8 @@ class KoppelWfsCsvAutoAlgorithm(KoppelWfsCsvAlgorithm):
             wfs_download_seconds = time.perf_counter() - wfs_download_started
             feedback.pushInfo(
                 "Landelijke WFS-schijfcache gereed: {0} objecten gedownload, "
-                "{1} objecten met een CSV-label bewaard, verdeeld over {2} "
-                "labels. Totale cache: {3:.1f} MB.".format(
+                "{1} objecten met een CSV-label bewaard, verdeeld over {2} labels. "
+                "Werkkopie nu {3:.1f} MB.".format(
                     downloaded_wfs_features,
                     retained_wfs_features,
                     retained_wfs_labels,
@@ -1059,28 +1008,26 @@ class KoppelWfsCsvAutoAlgorithm(KoppelWfsCsvAlgorithm):
             }
             matching_started = time.perf_counter()
 
-            while not feedback.isCanceled():
+            while True:
+                self._cancel_if_requested(
+                    feedback,
+                    "Landelijke koppeling geannuleerd; er wordt geen gedeeltelijk resultaat als voltooid gemeld.",
+                )
                 labels = self._next_cached_wfs_label_batch(
-                    connection,
-                    last_label,
-                    self.NATIONWIDE_MATCH_LABEL_BATCH,
+                    connection, last_label, self.NATIONWIDE_MATCH_LABEL_BATCH
                 )
                 if not labels:
                     break
 
                 batch_index += 1
                 feedback.setProgressText(
-                    "Landelijke schijfkoppeling: labelbatch {0}, {1}/{2} "
-                    "labels verwerkt...".format(
-                        batch_index, processed_labels, total_labels
-                    )
+                    "Landelijke schijfkoppeling: labelbatch {0}, {1}/{2} labels "
+                    "verwerkt...".format(batch_index, processed_labels, total_labels)
                 )
                 csv_rows, csv_groups = self._cached_rows_for_labels(
                     connection, labels, csv_fieldnames
                 )
-                records = self._cached_wfs_records_for_labels(
-                    connection, labels
-                )
+                records = self._cached_wfs_records_for_labels(connection, labels)
 
                 matched_local = set()
                 written, matched, newly_matched = self._write_records(
@@ -1094,12 +1041,9 @@ class KoppelWfsCsvAutoAlgorithm(KoppelWfsCsvAlgorithm):
                     matched_local,
                 )
                 matched_row_numbers = [
-                    csv_rows[index]["row_number"]
-                    for index in newly_matched
+                    csv_rows[index]["row_number"] for index in newly_matched
                 ]
-                self._mark_cached_batch(
-                    connection, set(), matched_row_numbers
-                )
+                self._mark_cached_batch(connection, matched_row_numbers)
 
                 total_geometry_records += written
                 total_matches += matched
@@ -1110,8 +1054,8 @@ class KoppelWfsCsvAutoAlgorithm(KoppelWfsCsvAlgorithm):
                     connection.commit()
                     gc.collect()
                     feedback.pushInfo(
-                        "Landelijke koppeling: {0}/{1} gezamenlijke labels, "
-                        "{2} WFS-geometrieën en {3} koppelingen.".format(
+                        "Landelijke koppeling: {0}/{1} gezamenlijke labels, {2} "
+                        "WFS-geometrieën en {3} koppelingen.".format(
                             processed_labels,
                             total_labels,
                             total_geometry_records,
@@ -1120,15 +1064,12 @@ class KoppelWfsCsvAutoAlgorithm(KoppelWfsCsvAlgorithm):
                     )
 
                 feedback.setProgress(
-                    55.0
-                    + 35.0 * processed_labels / max(1, total_labels)
+                    55.0 + 35.0 * processed_labels / max(1, total_labels)
                 )
                 del records, csv_rows, csv_groups, matched_local
             connection.commit()
 
             matching_seconds = time.perf_counter() - matching_started
-            found_wfs_labels = retained_wfs_labels
-
             if total_matches == 0:
                 feedback.pushInfo(
                     "Geen landelijke koppelingen. WFS-voorbeeld: {0}".format(
@@ -1154,9 +1095,8 @@ class KoppelWfsCsvAutoAlgorithm(KoppelWfsCsvAlgorithm):
 
             feedback.setProgress(100.0)
             feedback.pushInfo(
-                "Timing landelijk: schema {0:.2f} s; CSV-schijfindex {1:.2f} "
-                "s; WFS-download {2:.2f} s; schijfkoppeling {3:.2f} s; totaal "
-                "{4:.2f} s.".format(
+                "Timing landelijk: schema {0:.2f} s; CSV-index/werkkopie {1:.2f} s; "
+                "WFS-download {2:.2f} s; schijfkoppeling {3:.2f} s; totaal {4:.2f} s.".format(
                     schema_seconds,
                     csv_seconds,
                     wfs_download_seconds,
@@ -1165,11 +1105,9 @@ class KoppelWfsCsvAutoAlgorithm(KoppelWfsCsvAlgorithm):
                 )
             )
             feedback.pushInfo(
-                "Klaar landelijk: {0} CSV-labels verwerkt, {1} labels in WFS "
-                "gevonden, {2} WFS-geometrieën, {3} koppelingen en {4} niet-"
-                "gekoppelde CSV-rijen.".format(
+                "Klaar landelijk: {0} gezamenlijke labels verwerkt, {1} WFS-geometrieën, "
+                "{2} koppelingen en {3} niet-gekoppelde CSV-rijen.".format(
                     processed_labels,
-                    found_wfs_labels,
                     total_geometry_records,
                     total_matches,
                     unmatched_count,
@@ -1182,10 +1120,11 @@ class KoppelWfsCsvAutoAlgorithm(KoppelWfsCsvAlgorithm):
             if cache_path:
                 try:
                     os.remove(cache_path)
-                    feedback.pushInfo("Tijdelijke landelijke schijfcache verwijderd.")
+                    feedback.pushInfo("Tijdelijke landelijke WFS-werkkopie verwijderd.")
                 except OSError as exc:
                     feedback.pushInfo(
-                        "Tijdelijke cache kon niet worden verwijderd: " + str(exc)
+                        "Tijdelijke landelijke werkkopie kon niet worden verwijderd: "
+                        + str(exc)
                     )
 
     @staticmethod
@@ -1197,6 +1136,12 @@ class KoppelWfsCsvAutoAlgorithm(KoppelWfsCsvAlgorithm):
         total_started = time.perf_counter()
         csv_path = self.parameterAsFile(parameters, self.CSV_FILE, context)
         source_crs = QgsCoordinateReferenceSystem.fromEpsgId(self.RD_EPSG)
+        cache_folder = self.parameterAsString(
+            parameters, self.CACHE_FOLDER, context
+        ).strip()
+        if cache_folder.upper() == "TEMPORARY_OUTPUT":
+            cache_folder = ""
+
         extent = None
         if parameters.get(self.EXTENT) not in (None, ""):
             extent = self.parameterAsExtent(parameters, self.EXTENT, context, source_crs)
@@ -1204,11 +1149,6 @@ class KoppelWfsCsvAutoAlgorithm(KoppelWfsCsvAlgorithm):
                 extent = None
 
         if extent is None:
-            cache_folder = self.parameterAsString(
-                parameters, self.CACHE_FOLDER, context
-            ).strip()
-            if cache_folder.upper() == "TEMPORARY_OUTPUT":
-                cache_folder = ""
             return self._process_nationwide(
                 parameters,
                 context,
@@ -1223,60 +1163,64 @@ class KoppelWfsCsvAutoAlgorithm(KoppelWfsCsvAlgorithm):
         found_labels = set()
         total_geometry_records = 0
         total_matches = 0
-        type_name = None
-        label_field = None
         scanned_count = 0
-        schema_seconds = 0.0
-        label_scan_seconds = 0.0
-        geometry_seconds = 0.0
 
-        # In extent mode WFS labels must come first. They form the tiny allowlist
-        # used while streaming a nationwide CSV, preventing millions of complete
-        # 22-column row dictionaries from entering memory.
-        if extent is not None:
-            feedback.setProgressText("WFS-schema en labelveld controleren...")
-            try:
-                started = time.perf_counter()
-                type_name, label_field = self._resolve_type_and_label_field(
-                    extent, feedback
-                )
-                schema_seconds = time.perf_counter() - started
+        feedback.setProgressText("WFS-schema en labelveld controleren...")
+        try:
+            started = time.perf_counter()
+            type_name, label_field = self._resolve_type_and_label_field(
+                extent, feedback
+            )
+            schema_seconds = time.perf_counter() - started
 
-                feedback.setProgressText(
-                    "Alleen WFS-labels binnen schermextent ophalen..."
-                )
-                started = time.perf_counter()
-                extent_labels, scanned_count = self._fetch_extent_labels(
-                    type_name, label_field, extent
-                )
-                label_scan_seconds = time.perf_counter() - started
-                found_labels.update(extent_labels)
-            except DirectWfsError as exc:
-                raise QgsProcessingException(str(exc)) from exc
+            feedback.setProgressText("Alleen WFS-labels binnen schermextent ophalen...")
+            started = time.perf_counter()
+            extent_labels, scanned_count = self._fetch_extent_labels(
+                type_name, label_field, extent
+            )
+            label_scan_seconds = time.perf_counter() - started
+            found_labels.update(extent_labels)
+        except DirectWfsError as exc:
+            raise QgsProcessingException(str(exc)) from exc
 
-        feedback.setProgressText("CSV één keer streamen en relevante rijen selecteren...")
         csv_started = time.perf_counter()
-        csv_allowed_labels = found_labels if extent is not None else None
-        csv_fieldnames, csv_rows, csv_stats = self._read_csv(
-            csv_path, allowed_labels=csv_allowed_labels
-        )
-        csv_seconds = time.perf_counter() - csv_started
-        if extent is not None:
+        if found_labels:
+            feedback.setProgressText(
+                "Relevante CSV-rijen uit herbruikbare labelindex ophalen..."
+            )
+            csv_index = self._open_csv_index(csv_path, cache_folder, feedback)
+            try:
+                csv_fieldnames = list(csv_index.fieldnames)
+                csv_rows = csv_index.rows_for_labels(found_labels)
+                csv_stats = dict(csv_index.stats)
+                csv_stats["retained_rows"] = len(csv_rows)
+                index_reused = csv_index.reused
+                index_size_mb = os.path.getsize(csv_index.path) / 1048576
+            finally:
+                csv_index.close()
             feedback.pushInfo(
-                "CSV-selectie: {0} rij(en) gelezen, {1} rij(en) voor de {2} "
-                "WFS-label(s) in de extent bewaard. Rijen buiten de extent worden "
-                "niet als niet-gekoppeld uitgevoerd.".format(
+                "CSV-index {0}: {1} landelijke rij(en) geïndexeerd; {2} rij(en) "
+                "voor de {3} WFS-label(s) in deze extent geladen. Index {4:.1f} MB.".format(
+                    "hergebruikt" if index_reused else "nieuw gebouwd",
                     csv_stats["total_rows"],
                     csv_stats["retained_rows"],
                     len(found_labels),
+                    index_size_mb,
                 )
             )
         else:
+            _, csv_fieldnames = self._csv_schema(csv_path)
+            csv_rows = []
+            csv_stats = {
+                "total_rows": 0,
+                "retained_rows": 0,
+                "sample_labels": [],
+            }
             feedback.pushInfo(
-                "Geen extent gekozen: alle {0} CSV-rij(en) zijn ingelezen.".format(
-                    csv_stats["total_rows"]
-                )
+                "De extent bevat geen bruikbare WFS-labels; de landelijke CSV-index "
+                "hoeft daarom niet te worden geopend of opgebouwd."
             )
+        csv_seconds = time.perf_counter() - csv_started
 
         csv_groups = defaultdict(list)
         csv_pre_unmatched = {}
@@ -1316,51 +1260,35 @@ class KoppelWfsCsvAutoAlgorithm(KoppelWfsCsvAlgorithm):
                 self.invalidSinkError(parameters, self.UNMATCHED_CSV)
             )
 
-        if extent is not None:
-            common_labels = sorted(found_labels & set(csv_groups.keys()))
-            feedback.pushInfo(
-                "Extent-scan: {0} kabeldeel-labels gelezen, {1} unieke labels, "
-                "{2} label(s) komen ook in de CSV voor.".format(
-                    scanned_count, len(found_labels), len(common_labels)
-                )
+        common_labels = sorted(found_labels & set(csv_groups.keys()))
+        feedback.pushInfo(
+            "Extent-scan: {0} kabeldeel-labels gelezen, {1} unieke labels, {2} "
+            "label(s) komen ook in de CSV voor.".format(
+                scanned_count, len(found_labels), len(common_labels)
             )
-        elif csv_groups:
-            feedback.setProgressText("WFS-schema en labelveld controleren...")
-            try:
-                started = time.perf_counter()
-                type_name, label_field = self._resolve_type_and_label_field(
-                    extent, feedback
-                )
-                schema_seconds = time.perf_counter() - started
-            except DirectWfsError as exc:
-                raise QgsProcessingException(str(exc)) from exc
-            common_labels = sorted(csv_groups.keys())
-            found_labels.update(common_labels)
-            feedback.pushInfo(
-                "Geen extent gekozen: geometrie wordt alleen voor CSV-labels opgehaald."
-            )
-        else:
-            common_labels = []
+        )
 
+        geometry_seconds = 0.0
         if not common_labels:
             feedback.pushInfo(
                 "Geen exacte labelovereenkomst. WFS-voorbeeld: {0}".format(
                     self._sample(found_labels)
                 )
             )
-            csv_example = csv_groups.keys() or csv_stats["sample_labels"]
             feedback.pushInfo(
-                "CSV-voorbeeld: {0}".format(self._sample(csv_example))
+                "CSV-voorbeeld: {0}".format(
+                    self._sample(csv_stats.get("sample_labels", []))
+                )
             )
         else:
-            batches = self._chunks(
-                common_labels, self.LABELS_PER_GEOMETRY_REQUEST
-            )
+            batches = self._chunks(common_labels, self.LABELS_PER_GEOMETRY_REQUEST)
             geometry_started = time.perf_counter()
             try:
                 for batch_index, labels in enumerate(batches):
-                    if feedback.isCanceled():
-                        break
+                    self._cancel_if_requested(
+                        feedback,
+                        "Extentkoppeling geannuleerd; gedeeltelijke uitvoer is ongeldig.",
+                    )
                     feedback.setProgressText(
                         "Geometrie voor matches ophalen {0}/{1}...".format(
                             batch_index + 1, len(batches)
@@ -1394,11 +1322,13 @@ class KoppelWfsCsvAutoAlgorithm(KoppelWfsCsvAlgorithm):
             index for index in range(len(csv_rows)) if index not in matched_csv
         ]
         for csv_idx in unmatched_indices:
+            self._cancel_if_requested(
+                feedback,
+                "Schrijven van extentresultaten geannuleerd; gedeeltelijke uitvoer is ongeldig.",
+            )
             row = csv_rows[csv_idx]
             if csv_idx in csv_pre_unmatched:
                 reason = csv_pre_unmatched[csv_idx]
-            elif row["label"] not in found_labels and extent is None:
-                reason = "GEEN_EXACT_LABEL_IN_WFS"
             else:
                 reason = "GEEN_WFS_LIJN_OVER_IN_LABELGROEP"
 
@@ -1410,8 +1340,8 @@ class KoppelWfsCsvAutoAlgorithm(KoppelWfsCsvAlgorithm):
 
         feedback.setProgress(100.0)
         feedback.pushInfo(
-            "Timing: schema {0:.2f} s; labelscan {1:.2f} s; CSV {2:.2f} s; "
-            "WFS-geometrie {3:.2f} s; totaal {4:.2f} s.".format(
+            "Timing: schema {0:.2f} s; labelscan {1:.2f} s; CSV-index/selectie "
+            "{2:.2f} s; WFS-geometrie {3:.2f} s; totaal {4:.2f} s.".format(
                 schema_seconds,
                 label_scan_seconds,
                 csv_seconds,
@@ -1419,18 +1349,9 @@ class KoppelWfsCsvAutoAlgorithm(KoppelWfsCsvAlgorithm):
                 time.perf_counter() - total_started,
             )
         )
-        self.addParameter(
-            QgsProcessingParameterFolderDestination(
-                self.CACHE_FOLDER,
-                self.tr(
-                    "Landelijke modus: tijdelijke cachemap op lokale SSD (optioneel)"
-                ),
-                optional=True,
-            )
-        )
         feedback.pushInfo(
             "Klaar: {0} relevante WFS-geometrie(ën) verwerkt, {1} koppeling(en), "
-            "{2} CSV-rij(en) zonder match.".format(
+            "{2} relevante CSV-rij(en) zonder match.".format(
                 total_geometry_records, total_matches, len(unmatched_indices)
             )
         )

@@ -16,20 +16,23 @@ jobs:
       - name: Pure Python tests
         run: python3 -m unittest discover -s tests -v
 
-      - name: QGIS 4.2 plugin and GeoJSON smoke test
+      - name: QGIS 4.2 plugin smoke test
         shell: bash
         run: |
           set -euo pipefail
           rm -rf /tmp/qgis-plugin-test
           mkdir -p /tmp/qgis-plugin-test/enexiskabel
           cp -R . /tmp/qgis-plugin-test/enexiskabel/
-          PYTHONPATH=/tmp/qgis-plugin-test python3 - <<'PY'
+          mkdir -p /tmp/qgis-runtime
+          chmod 700 /tmp/qgis-runtime
+          QT_QPA_PLATFORM=offscreen XDG_RUNTIME_DIR=/tmp/qgis-runtime PYTHONPATH=/tmp/qgis-plugin-test:/usr/share/qgis/python python3 - <<'PY'
           from qgis.core import QgsApplication, QgsJsonUtils, Qgis
 
           app = QgsApplication([], False)
           app.initQgis()
 
           from enexiskabel.algorithm_auto import KoppelWfsCsvAutoAlgorithm
+          from enexiskabel.algorithm_dxf import SplitNaarDXF
           from enexiskabel.provider import EnexisKabelProvider
 
           assert Qgis.QGIS_VERSION_INT >= 40200, Qgis.QGIS_VERSION
@@ -37,11 +40,13 @@ jobs:
           algorithm = KoppelWfsCsvAutoAlgorithm()
           algorithm.initAlgorithm()
           assert algorithm.name() == "koppel_enexis_wfs_kabels_automatisch_aan_csv"
-          assert len(algorithm.parameterDefinitions()) == 4
+          definitions = algorithm.parameterDefinitions()
+          assert len(definitions) == 5, [p.name() for p in definitions]
+          assert {p.name() for p in definitions} == {
+              "CSV_FILE", "EXTENT", "CACHE_FOLDER", "OUTPUT", "UNMATCHED_CSV"
+          }
           assert algorithm.MAX_EXTENT_LABEL_FEATURES == 10000
-          assert algorithm.MAX_LABEL_SCAN_BYTES == 4 * 1024 * 1024
-          assert algorithm.LABELS_PER_GEOMETRY_REQUEST == 10
-          assert algorithm.MAX_GEOMETRY_RESPONSE_BYTES == 8 * 1024 * 1024
+          assert algorithm.NATIONWIDE_WFS_PAGE_SIZE == 10000
 
           properties = {
               "object_id": 1,
@@ -54,10 +59,14 @@ jobs:
           assert not geometry.isNull()
           assert round(geometry.length(), 2) == 10.0
 
+          dxf = SplitNaarDXF()
+          dxf.initAlgorithm()
+          assert dxf.name() == "splitnaardxf_v5_kabelkoppeling"
+
           provider = EnexisKabelProvider()
           provider.loadAlgorithms()
-          assert len(provider.algorithms()) == 1
+          assert len(provider.algorithms()) == 2
 
           app.exitQgis()
-          print("QGIS 4.2 v0.8 smoke test OK")
+          print("QGIS 4.2 v0.13 smoke test OK")
           PY
