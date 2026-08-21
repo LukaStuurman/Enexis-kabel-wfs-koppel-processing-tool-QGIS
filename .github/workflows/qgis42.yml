@@ -31,9 +31,11 @@ jobs:
           app = QgsApplication([], False)
           app.initQgis()
 
-          from enexiskabel.algorithm_fast import KoppelWfsCsvAutoAlgorithm
+          from enexiskabel.algorithm_source import KoppelWfsCsvAutoAlgorithm
           from enexiskabel.algorithm_dxf import SplitNaarDXF
           from enexiskabel.nationwide_fast import NationwideProcessor
+          from enexiskabel.shape_archive import TARGET_FOLDER, SHAPE_DOWNLOAD_URL
+          from enexiskabel.shape_nationwide import ShapeNationwideProcessor
           from enexiskabel.provider import EnexisKabelProvider
 
           assert Qgis.QGIS_VERSION_INT >= 40200, Qgis.QGIS_VERSION
@@ -43,7 +45,7 @@ jobs:
           assert algorithm.name() == "koppel_enexis_wfs_kabels_automatisch_aan_csv"
           assert algorithm.TYPE_HINT == "asm_e_lv_map_cable"
           definitions = algorithm.parameterDefinitions()
-          assert len(definitions) == 7, [p.name() for p in definitions]
+          assert len(definitions) == 9, [p.name() for p in definitions]
           assert {p.name() for p in definitions} == {
               "CSV_FILE",
               "EXTENT",
@@ -52,7 +54,16 @@ jobs:
               "UNMATCHED_CSV",
               "REFRESH_WFS_INDEX",
               "ONLY_MATCHED_OUTPUT",
+              "NATIONWIDE_SOURCE",
+              "REFRESH_SHAPE_DOWNLOAD",
           }
+          assert algorithm.SOURCE_OPTIONS[0].startswith("WFS")
+          assert "Noord" in algorithm.SOURCE_OPTIONS[1]
+          assert "Zuid" in algorithm.SOURCE_OPTIONS[2]
+          assert "Noord + Zuid" in algorithm.SOURCE_OPTIONS[3]
+          assert TARGET_FOLDER == "imkl_elektriciteitskabel_e_lv_map_cable_ligging"
+          assert SHAPE_DOWNLOAD_URL.startswith("https://c.spotler.com/ct/")
+
           assert algorithm.MAX_EXTENT_LABEL_FEATURES == 10000
           assert NationwideProcessor.TILE_SIZE_M == 25000.0
           assert NationwideProcessor.MAX_TILE_WORKERS == 2
@@ -72,6 +83,13 @@ jobs:
           children = NationwideProcessor._split_tile((1, 0, 0, 100, 100))
           assert len(children) == 4
 
+          shape_processor = ShapeNationwideProcessor.__new__(ShapeNationwideProcessor)
+          shape_processor.region_mode = "beide"
+          selected = shape_processor._selected_paths({"noord": "n.shp", "zuid": "z.shp"})
+          assert selected == [("noord", "n.shp"), ("zuid", "z.shp")]
+          assert shape_processor._name_score("label") == 100
+          assert shape_processor._name_score("kabelgroep") >= 80
+
           properties = {
               "object_id": 1,
               "display_text": "Kabelgroup: TEST-01",
@@ -90,10 +108,10 @@ jobs:
           provider = EnexisKabelProvider()
           provider.loadAlgorithms()
           assert len(provider.algorithms()) == 2
-          assert provider.algorithms()[0].__class__.__module__ == "enexiskabel.algorithm_fast"
+          assert provider.algorithms()[0].__class__.__module__ == "enexiskabel.algorithm_source"
 
           app.exitQgis()
-          print("QGIS 4.2 v0.14 smoke test OK")
+          print("QGIS 4.2 v0.15 smoke test OK")
           PY
 
       - name: Probe live Enexis WFS GeoPackage output
@@ -137,7 +155,7 @@ jobs:
           }
           request = urllib.request.Request(
               base + "?" + urllib.parse.urlencode(params),
-              headers={"User-Agent": "Enexis-QGIS-v014-CI-probe"},
+              headers={"User-Agent": "Enexis-QGIS-v015-CI-probe"},
           )
           try:
               with urllib.request.urlopen(request, timeout=30) as response:
