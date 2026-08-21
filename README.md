@@ -1,127 +1,126 @@
-# Enexis kabel WFS ↔ CSV koppeling voor QGIS 4.2
+# Enexis kabel WFS/SHAPE ↔ CSV koppeling voor QGIS 4.2
 
-QGIS Processing-plugin die Enexis `e_lv_map_cable`-kabellijnen **strikt 1-op-1** koppelt aan rijen uit een CSV-export en gekoppelde kabels naar DXF kan exporteren.
+QGIS Processing-plugin die Enexis laagspanningskabels **strikt 1-op-1** koppelt aan rijen uit een landelijke CSV en gekoppelde kabels naar DXF kan exporteren.
 
-## v0.14.0: snelle landelijke koppeling met twee permanente indexes
+## v0.15.0: landelijke bronkeuze WFS of automatische SHAPE-download
 
-Versie 0.14 gebruikt voor heel Nederland niet meer bij iedere run opnieuw de volledige Enexis WFS-download. De plugin onderhoudt nu twee herbruikbare SQLite-indexes op lokale schijf:
+Voor kleine kaartgebieden blijft de bestaande snelle WFS-extentroute actief. Voor landelijke verwerking kan v0.15 kiezen uit:
 
-- **CSV-index**: `Kabel Subgroep`, kaartlengte, CSV-rijnummer en oorspronkelijke CSV-waarden;
-- **WFS-index**: stabiele bron-ID/geometry-hash, genormaliseerd kabelgroeplabel, RD-lengte en WKB-geometrie.
+1. **WFS (online tegelindex)**
+2. **SHAPE Noord (automatisch downloaden)**
+3. **SHAPE Zuid (automatisch downloaden)**
+4. **SHAPE Noord + Zuid (automatisch downloaden)** — standaard voor heel Nederland
 
-Na de eerste indexbouw is een volgende landelijke koppeling in principe volledig lokaal:
+De SHAPE-route is bedoeld als snellere en minder netwerkafhankelijke landelijke bron. Na de eerste download en indexbouw zijn volgende koppelingen volledig lokaal.
 
-**CSV-index + WFS-index → lokale 1-op-1 matching → GeoPackage-output**
+## Automatische Enexis SHAPE-download
 
-De netwerkverbinding met Enexis is dan niet meer de bottleneck, tenzij **Vernieuw landelijke WFS-index vanaf Enexis** wordt aangevinkt.
+De plugin bevat de door de gebruiker aangeleverde Enexis-downloadlink. De Outlook SafeLinks-wrapper is niet nodig in QGIS: de plugin gebruikt rechtstreeks het daarin opgenomen Spotler-doel en volgt automatisch de redirect naar het ZIP-bestand.
 
-## De vijf landelijke snelheidsverbeteringen
+Bij de eerste SHAPE-run:
 
-### 1. WFS-download per RD-tegel
+1. de ZIP wordt **streamend naar de lokale cachemap** gedownload; de volledige ZIP komt dus niet in RAM;
+2. de tijdelijke download wordt als ZIP gevalideerd;
+3. alleen deze map wordt uit het archief gehaald:
+   `imkl_elektriciteitskabel_e_lv_map_cable_ligging`;
+4. in die map moet exact één `.shp` met **Noord/North** en één `.shp` met **Zuid/South** in de bestandsnaam staan;
+5. bij beide SHAPE-bestanden worden `.dbf`, `.shx` en `.prj` vereist;
+6. de gekozen regio('s) worden naar een permanente lokale SQLite-kabelindex geconverteerd.
 
-De eerste WFS-index wordt niet meer als één landelijke `startIndex`-reeks opgehaald. Nederland wordt verdeeld in RD-hoofdtegels van **25 × 25 km**. Iedere tegel gebruikt een WFS `bbox`.
+De extractie gebeurt eerst in een tijdelijke map. Pas nadat de ZIP-inhoud en beide SHAPE-sets geldig zijn, wordt de bestaande cache atomair vervangen. Mislukt dat vervangen, dan wordt de vorige geldige extractie teruggezet.
 
-Een hoofdtegel vraagt maximaal 5.001 objecten. Komt er meer terug of wordt de response te groot, dan wordt uitsluitend die tegel automatisch in vier kleinere BBOX-tegels verdeeld. Dit gaat adaptief door tot de response veilig past. De actieve landelijke route heeft daardoor geen `startIndex`- of `sortBy=fid`-paginering nodig.
+## SHAPE-cache vernieuwen
 
-Objecten op tegelgrenzen worden via hun WFS-feature-ID of, wanneer die niet beschikbaar is, een stabiele label+geometry-hash gededupliceerd. Onder ongeveer 1 km tegelgrootte stopt de plugin gecontroleerd wanneer een tegel nog steeds boven de veiligheidsgrens zit, zodat WFS-truncatie nooit stil wordt geaccepteerd.
+De ZIP wordt niet bij iedere run opnieuw gedownload. Dat zou de landelijke snelheidswinst tenietdoen.
 
-### 2. Permanente WFS-index
+De eerste run downloadt automatisch. Daarna worden zowel de ZIP als de permanente kabelindex hergebruikt. Voor een nieuwe Enexis-uitgave vink je aan:
 
-De landelijke WFS-geometrieën blijven na een succesvolle indexbouw lokaal beschikbaar. De index bevat alleen de gegevens die voor koppeling nodig zijn en krijgt een index op het genormaliseerde label.
+**SHAPE ZIP opnieuw downloaden en SHAPE-index vernieuwen**
 
-De WFS-index wordt opnieuw opgebouwd wanneer:
+Een gewijzigde lokale ZIP wordt tevens herkend via bestandsgrootte, wijzigingstijd en een SHA-256-fingerprint van begin en einde van het bestand.
 
-- er nog geen geldige WFS-index bestaat;
-- de interne indexversie/schema niet meer overeenkomt;
-- featuretype, labelveld, geometrieveld of CRS verandert;
-- **Vernieuw landelijke WFS-index vanaf Enexis** expliciet wordt aangevinkt.
+## Noord, Zuid of heel Nederland
 
-Een mislukte of geannuleerde vernieuwing wordt eerst in een apart bouwbestand uitgevoerd. De bestaande goede WFS-index blijft daardoor behouden totdat de nieuwe index volledig gereed is.
+- **SHAPE Noord** leest alleen de Noord-SHAPE uit de gedownloade ZIP.
+- **SHAPE Zuid** leest alleen de Zuid-SHAPE.
+- **SHAPE Noord + Zuid** leest beide en dedupliceert identieke grensobjecten op genormaliseerd label + geometrie.
 
-### 3. Geen kopie van de volledige CSV-index meer
+Voor een landelijke run staat **Noord + Zuid standaard geselecteerd**.
 
-v0.13 maakte voor een landelijke run eerst een volledige werkkopie van de CSV-index. Bij een index van honderden MB's kost dat onnodige SSD-I/O en extra vrije schijfruimte.
+## Kabelgroep uit SHAPE
 
-v0.14 opent de bestaande CSV-index en koppelt de WFS-index met SQLite `ATTACH DATABASE`. Alleen de gematchte CSV-rijnummers worden in een tijdelijke SQLite-tabel bijgehouden. `temp_store=FILE` houdt ook die runstatus schijfgebaseerd.
+De plugin detecteert automatisch het kabelgroep/labelveld in de DBF. Eerst worden duidelijke veldnamen gebruikt, zoals `label`, `kabelgroep`, `kabelgroup` of een door Shapefile afgekorte variant. Wanneer de veldnaam niet duidelijk genoeg is, worden voorbeeldwaarden gecontroleerd op bekende prefixes.
 
-De permanente CSV- en WFS-index worden niet met `matched`-status vervuild.
+Voor SHAPE worden onder andere deze vormen genormaliseerd:
 
-### 4. Alleen GEKOPPELD uitvoeren
+- `Kabelgroup: WLR1760-03` → `WLR1760-03`
+- `Kabelgroep: WLR1760-03` → `WLR1760-03`
+- `Cablegroup: WLR1760-03` → `WLR1760-03`
+
+Daarna blijft de vergelijking met CSV `Kabel Subgroep` exact en case-sensitive.
+
+## CRS en geometrie
+
+De uiteindelijke kabelindex gebruikt **EPSG:28992 / RD New**. Als de SHAPE een ander geldig CRS bevat, transformeert QGIS de geometrie naar RD voordat de lengte wordt berekend.
+
+LineString-geometrieën worden naar MultiLineString gepromoveerd zodat ze veilig naar dezelfde landelijke GeoPackage-output kunnen worden geschreven als de WFS-route.
+
+## Permanente lokale indexes
+
+De landelijke workflow gebruikt twee lokale indexes:
+
+- **CSV-index**: CSV-rijnummer, `Kabel Subgroep`, kaartlengte en oorspronkelijke CSV-waarden;
+- **kabelindex**: genormaliseerd kabelgroeplabel, RD-lengte en WKB-geometrie uit SHAPE of WFS.
+
+De CSV-index wordt niet meer naar een volledige werkkopie gekopieerd. SQLite koppelt de kabelindex met `ATTACH DATABASE`; alleen de gematchte CSV-rijnummers staan tijdelijk op schijf.
+
+Na de eerste SHAPE-download/indexbouw is de normale route dus:
+
+**CSV-index + SHAPE-kabelindex → lokale 1-op-1 matching → GeoPackage-output**
+
+Er zijn dan geen landelijke WFS-requests nodig.
+
+## WFS blijft beschikbaar
+
+De bestaande v0.14 WFS-route blijft als fallback beschikbaar. Die gebruikt:
+
+- RD-hoofdtegels van 25 × 25 km;
+- adaptieve ruimtelijke opsplitsing voor te drukke tegels;
+- maximaal twee gelijktijdige netwerkrequests;
+- geen landelijke hoge `startIndex`-paginering;
+- een permanente lokale WFS-kabelindex.
+
+De WFS-server bood bij de live controle van 21 augustus 2026 geen directe GeoPackage-output: `outputFormat=geopkg` gaf HTTP 400. Daarom gebruikt de WFS-fallback momenteel GeoJSON wanneer een WFS-index opnieuw moet worden opgebouwd.
+
+## Snelle landelijke output
 
 Voor landelijke runs staat standaard aan:
 
 **Landelijk: alleen GEKOPPELD schrijven (snelste; geen unmatched CSV)**
 
-In deze modus:
+Hierdoor worden alleen daadwerkelijk gekoppelde kabels naar de grote lijnoutput geschreven. Zet de optie uit wanneer ook alle niet-gekoppelde CSV-rijen nodig zijn.
 
-- worden alleen daadwerkelijk gekoppelde WFS-kabels naar de grote lijnoutput geschreven;
-- worden overgebleven WFS-objecten niet uitgeschreven;
-- wordt de landelijke unmatched-CSV-output niet gevuld.
-
-Dit voorkomt miljoenen onnodige outputwrites. Schakel de optie uit wanneer een volledige analyse van niet-gekoppelde CSV-rijen nodig is.
-
-### 5. Begrensde parallelisatie
-
-De WFS-indexbouw gebruikt maximaal **2 gelijktijdige tegelrequests**. Dit versnelt netwerk-I/O zonder terug te gaan naar agressieve parallelisatie.
-
-Ruwe tegelresponses worden naar tijdelijke bestanden geschreven. QGIS-geometrieparsing en SQLite-inserts gebeuren gecontroleerd buiten de netwerkthreads, zodat grote geometrysets niet tegelijk als Python/QGIS-objecten in RAM staan.
-
-## GeoPackage-output rechtstreeks van Enexis WFS
-
-GeoServer kan WFS GeoPackage-output aanbieden wanneer de GeoPackage Output Extension op de server is geïnstalleerd. v0.14 controleert dit tijdens een WFS-indexbouw met een echte minimale `outputFormat=geopkg`-request.
-
-**Live controle op 21 augustus 2026:** Enexis GetCapabilities rapporteerde het kabeltype als `Enexis_Opendata:asm_e_lv_map_cable`. Een WFS `GetFeature` met `outputFormat=geopkg` gaf HTTP 400. De huidige Enexis WFS biedt dus geen directe GeoPackage-output aan en v0.14 gebruikt momenteel GeoJSON voor de tegelindex.
-
-De probe blijft in de plugin aanwezig. Als Enexis de GeoPackage-extensie later inschakelt, wordt dit automatisch ontdekt. Als GeoPackage beschikbaar is, benchmark de plugin een kleine GeoJSON- en GeoPackage-response en kiest GeoPackage alleen wanneer de live meting een duidelijk voordeel in responstijd of overdrachtsgrootte laat zien.
-
-## CSV-index
-
-De CSV-index uit v0.13 blijft behouden. De CSV wordt alleen opnieuw geïndexeerd wanneer de bron is veranderd. De controle gebruikt onder andere:
-
-- absoluut bestandspad;
-- bestandsgrootte;
-- wijzigingstijd;
-- SHA-256-fingerprint van begin en einde van het bestand;
-- interne indexversie.
-
-Bij een kleine schermextent worden na de WFS-labelscan alleen relevante CSV-labels via SQLite `WHERE label IN (...)` geladen. De volledige landelijke CSV hoeft dus niet opnieuw te worden doorgelopen.
+Gebruik voor de landelijke output expliciet een **GeoPackage op lokale SSD**. Grote landelijke memory-/temporary-uitvoer wordt waar nodig geweigerd om RAM-problemen te voorkomen.
 
 ## Extentmodus
 
-Kies bij **Beperk WFS tot scherm/gebied** bij voorkeur **Use current map canvas extent**.
+Wanneer **Beperk WFS tot scherm/gebied** is ingevuld, wordt de landelijke bronkeuze genegeerd en gebruikt de plugin de bestaande lichte WFS-route:
 
-De bestaande snelle extentroute blijft:
+1. alleen labels binnen de extent ophalen;
+2. alleen relevante labels uit de herbruikbare CSV-index lezen;
+3. alleen gezamenlijke labels als geometrie opvragen;
+4. `BBOX(...) AND label IN (...)` toepassen;
+5. strikt 1-op-1 op kaartlengte matchen.
 
-1. extent naar EPSG:28992;
-2. alleen WFS-labelattribuut binnen de extent ophalen;
-3. relevante CSV-rijen via de herbruikbare CSV-index selecteren;
-4. alleen gezamenlijke labels als WFS-geometrie opvragen;
-5. `BBOX(geografischeligging, ...) AND label IN (...)` gebruiken;
-6. strikt 1-op-1 op kaartlengte matchen.
-
-De labelscan is begrensd op 10.000 kabeldelen / 4 MB. Geometriebatches bevatten maximaal 10 labels, maximaal 1.000 features en maximaal 8 MB.
-
-## Landelijke modus gebruiken
-
-Laat **Beperk WFS tot scherm/gebied** leeg.
-
-Aanbevolen instellingen:
-
-- **CSV-index/cachemap:** vaste map op lokale SSD;
-- **Vernieuw landelijke WFS-index:** alleen aan voor een bewuste data-update;
-- **Alleen GEKOPPELD schrijven:** aan voor maximale snelheid;
-- **Gekoppelde WFS-lijnen:** expliciet GeoPackage-bestand op lokale SSD;
-- unmatched-output mag bij matched-only leeg/tijdelijk zijn; wanneer matched-only uitstaat moet ook deze grote output naar schijf.
-
-De eerste landelijke v0.14-run kan nog lang duren omdat circa twee miljoen WFS-kabeldelen eenmalig lokaal moeten worden geïndexeerd. De grote winst zit vooral in alle volgende landelijke koppelingen: de WFS hoeft dan niet opnieuw te worden gedownload.
+De labelscan is begrensd op 10.000 kabeldelen / 4 MB. Geometriebatches bevatten maximaal 10 gezamenlijke labels, maximaal 1.000 features en maximaal 8 MB.
 
 ## Koppelregels
 
-1. `Kabelgroup: WLR1760-03` wordt genormaliseerd naar `WLR1760-03`.
-2. Het genormaliseerde WFS-label moet exact gelijk zijn aan CSV `Kabel Subgroep`.
-3. WFS-lengte wordt in RD New in meters berekend en op twee decimalen afgerond.
+1. WFS/SHAPE-kabelgroep wordt naar de kale kabelgroepsleutel genormaliseerd.
+2. De sleutel moet exact gelijk zijn aan CSV `Kabel Subgroep`.
+3. Geometrielengte wordt in RD New in meters berekend en op twee decimalen afgerond.
 4. Binnen hetzelfde label wordt strikt 1-op-1 gekoppeld op minimale totale absolute lengteafwijking.
-5. Iedere WFS-lijn en CSV-rij wordt maximaal één keer gebruikt.
+5. Iedere kabelgeometrie en CSV-rij wordt maximaal één keer gebruikt.
 6. Er geldt geen maximale lengtetolerantie; `len_diff_m` laat de afwijking zien.
 
 ## CSV
@@ -137,8 +136,16 @@ Komma- en puntdecimalen worden ondersteund.
 
 De plugin bevat ook **Split gekoppelde kabels naar DXF (V6 - landelijk)**. De landelijke DXF-modus streamt features rechtstreeks naar begrensde DXF-delen en verzamelt geen landelijke geometrieverzameling in RAM.
 
-## QGIS-versie
+## QGIS-versie en tests
 
 Doelplatform: **QGIS 4.2.0 / Qt6**.
 
-CI draait de pure Python-index/matchingtests, importeert de actieve provider in de officiële `qgis/qgis:4.2.0-questing` container met Qt offscreen en voert daarnaast een niet-blokkerende live Enexis WFS-formaatprobe uit.
+CI test onder andere:
+
+- de strikte matching;
+- herbruikbare CSV- en kabelindexes;
+- veilige ZIP-extractie en Noord/Zuid-detectie met een synthetische ZIP;
+- gesimuleerde streamende ZIP-download zonder de echte grote Enexis-ZIP op te halen;
+- de actieve provider en alle Processing-parameters in de officiële `qgis/qgis:4.2.0-questing` container;
+- SHAPE-labelnormalisatie en LineString→MultiLineString-conversie in echte QGIS 4.2;
+- de bestaande WFS-tegelroute en niet-blokkerende live WFS-formaatprobe.
