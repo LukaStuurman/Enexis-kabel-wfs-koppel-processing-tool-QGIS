@@ -43,6 +43,16 @@ class ShapeArchiveTests(unittest.TestCase):
             self._write_shape_set(archive, folder, "kabels_zuid")
         return buffer.getvalue()
 
+    def test_uses_current_enexis_shape_download_link(self):
+        self.assertEqual(
+            shape_archive.SHAPE_DOWNLOAD_URL,
+            "https://c.spotler.com/ct/m3/k1/"
+            "KdKQtH6B0wZjnPBT7BzqOtEsn-w1iebQF8ZDB2NGKTYcA4pq8agO-N_rqoymPoGmXmbyRWK5Y-t6tJGhGUv84awweWYQnJYsH5vDkKODg3_b1yt9gHlYGgO6bvmtvIKmr8wPsm5YhfVgEzVmNVPQ6wqVW49PJ4Twysgqdkc00ryGvq4cQnuanRps7J1UzY9JRCE_DjZR-FqZ7a2pj5ESEw/"
+            "ig3SD3vmbjdIP76",
+        )
+        self.assertIn(shape_archive.DOWNLOAD_ID, shape_archive.ARCHIVE_NAME)
+        self.assertIn(shape_archive.DOWNLOAD_ID, shape_archive.EXTRACTED_NAME)
+
     def test_streamed_download_writes_valid_zip_atomically(self):
         data = self._valid_zip_bytes()
 
