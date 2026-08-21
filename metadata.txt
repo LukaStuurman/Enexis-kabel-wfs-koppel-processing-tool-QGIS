@@ -1,7 +1,7 @@
 [general]
 name=Enexis Kabel WFS-CSV Koppeling
 description=QGIS 4.2 Processing-tools met herbruikbare CSV- en kabelindex, automatische Enexis SHAPE Noord/Zuid-download, WFS-fallback, snelle extentkoppeling en landelijke DXF-export.
-version=0.15.0
+version=0.15.1
 qgisMinimumVersion=4.2
 author=LukaStuurman
 email=
