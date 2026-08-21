@@ -1,4 +1,5 @@
 import importlib.util
+import io
 import pathlib
 import sys
 import tempfile
@@ -33,6 +34,43 @@ class ShapeArchiveTests(unittest.TestCase):
             (".cpg", b"UTF-8"),
         ):
             archive.writestr(folder + "/" + stem + ext, data)
+
+    def _valid_zip_bytes(self):
+        buffer = io.BytesIO()
+        folder = "top/" + shape_archive.TARGET_FOLDER
+        with zipfile.ZipFile(buffer, "w") as archive:
+            self._write_shape_set(archive, folder, "kabels_noord")
+            self._write_shape_set(archive, folder, "kabels_zuid")
+        return buffer.getvalue()
+
+    def test_streamed_download_writes_valid_zip_atomically(self):
+        data = self._valid_zip_bytes()
+
+        class Response:
+            def __init__(self, payload):
+                self.buffer = io.BytesIO(payload)
+                self.headers = {"Content-Length": str(len(payload))}
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def read(self, size=-1):
+                return self.buffer.read(size)
+
+        original = shape_archive.urlopen
+        shape_archive.urlopen = lambda request, timeout=None: Response(data)
+        try:
+            with tempfile.TemporaryDirectory() as temp_dir:
+                destination = pathlib.Path(temp_dir) / "download.zip"
+                shape_archive.download_archive(str(destination))
+                self.assertTrue(destination.exists())
+                self.assertTrue(zipfile.is_zipfile(destination))
+                self.assertEqual(destination.read_bytes(), data)
+        finally:
+            shape_archive.urlopen = original
 
     def test_extracts_only_target_folder_and_finds_noord_zuid(self):
         with tempfile.TemporaryDirectory() as temp_dir:
