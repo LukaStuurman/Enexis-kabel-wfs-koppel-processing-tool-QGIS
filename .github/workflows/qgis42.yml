@@ -23,7 +23,9 @@ jobs:
           rm -rf /tmp/qgis-plugin-test
           mkdir -p /tmp/qgis-plugin-test/enexiskabel
           cp -R . /tmp/qgis-plugin-test/enexiskabel/
-          PYTHONPATH=/tmp/qgis-plugin-test:/usr/share/qgis/python python3 - <<'PY'
+          mkdir -p /tmp/qgis-runtime
+          chmod 700 /tmp/qgis-runtime
+          QT_QPA_PLATFORM=offscreen XDG_RUNTIME_DIR=/tmp/qgis-runtime PYTHONPATH=/tmp/qgis-plugin-test:/usr/share/qgis/python python3 - <<'PY'
           from qgis.core import QgsApplication, QgsJsonUtils, Qgis
 
           app = QgsApplication([], False)
