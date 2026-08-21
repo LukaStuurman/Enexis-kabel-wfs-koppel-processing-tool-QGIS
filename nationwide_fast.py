@@ -4,15 +4,51 @@
 from __future__ import annotations
 
 import os
+import sqlite3
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 
 from qgis.core import QgsProcessingException, QgsVectorLayer
 
+from .matching import normalize_label
 from .nationwide import NationwideProcessor as BaseNationwideProcessor
 from .wfs_index import WfsIndexBuilder, WfsIndexError, tile_bounds
 
 
 class NationwideProcessor(BaseNationwideProcessor):
+    def _params(
+        self,
+        type_name,
+        label_field,
+        count,
+        bbox=None,
+        start_index=0,
+        output_format="application/json",
+    ):
+        # WFS feature IDs are not guaranteed to be normal attributes. Request
+        # only the label + geometry; GeoJSON still supplies feature['id'] and
+        # GeoPackage can fall back to a stable label+geometry hash.
+        params = {
+            "service": "WFS",
+            "version": "2.0.0",
+            "request": "GetFeature",
+            "typeNames": type_name,
+            "outputFormat": output_format,
+            "srsName": self.algorithm.RD_AUTHID,
+            "count": str(count),
+            "propertyName": ",".join(
+                (label_field, self.algorithm.GEOMETRY_FIELD)
+            ),
+            "sortBy": "fid A",
+        }
+        if start_index:
+            params["startIndex"] = str(start_index)
+        if bbox is not None:
+            _, xmin, ymin, xmax, ymax = bbox
+            params["bbox"] = "{0},{1},{2},{3},{4}".format(
+                xmin, ymin, xmax, ymax, self.algorithm.RD_AUTHID
+            )
+        return params
+
     def _records_from_gpkg(self, path, label_field):
         table_name, _ = self._gpkg_feature_table(path)
         if not table_name:
@@ -32,9 +68,6 @@ class NationwideProcessor(BaseNationwideProcessor):
                 label_value = feature[actual_label]
             except Exception:
                 label_value = None
-            from .matching import normalize_label
-            import sqlite3
-
             label = normalize_label(label_value)
             geometry = feature.geometry()
             if not label or geometry is None or geometry.isEmpty():
