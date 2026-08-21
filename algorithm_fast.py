@@ -4,7 +4,7 @@
 from qgis.core import QgsProcessingParameterBoolean
 
 from .algorithm_auto import KoppelWfsCsvAutoAlgorithm as BaseKoppelWfsCsvAutoAlgorithm
-from .nationwide import NationwideProcessor
+from .nationwide_fast import NationwideProcessor
 
 
 class KoppelWfsCsvAutoAlgorithm(BaseKoppelWfsCsvAutoAlgorithm):
