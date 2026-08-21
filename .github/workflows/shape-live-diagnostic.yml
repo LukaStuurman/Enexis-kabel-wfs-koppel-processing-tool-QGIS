@@ -15,7 +15,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Inspect Spotler response and test ZIP with GDAL OGR
+      - name: Inspect Spotler response, discover S3 SHAPE ZIP, and test with GDAL OGR
         shell: bash
         run: |
           set -euo pipefail
@@ -25,44 +25,126 @@ jobs:
           import re
           import subprocess
           import tempfile
+          import urllib.error
+          import urllib.parse
           import urllib.request
+          import xml.etree.ElementTree as ET
           import zipfile
 
           import shape_archive
 
-          url = shape_archive.SHAPE_DOWNLOAD_URL
-          print('REQUEST_URL=', url)
-          req = urllib.request.Request(
-              url,
-              headers={
-                  'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/151 Safari/537.36',
-                  'Accept': 'application/zip, application/octet-stream, text/html;q=0.9, */*;q=0.8',
-                  'Accept-Language': 'nl-NL,nl;q=0.9,en;q=0.8',
-              },
-          )
-          with urllib.request.urlopen(req, timeout=90) as response:
-              print('STATUS=', getattr(response, 'status', None))
-              print('FINAL_URL=', response.geturl())
-              for key in ('Content-Type', 'Content-Length', 'Content-Disposition', 'Location'):
-                  print(key.upper().replace('-', '_') + '=', response.headers.get(key))
-              first = response.read(8192)
-          print('FIRST_32_HEX=', first[:32].hex())
-          print('ZIP_MAGIC=', first.startswith(b'PK\x03\x04'))
-          if not first.startswith(b'PK\x03\x04'):
-              text = first.decode('utf-8', errors='replace')
+          headers = {
+              'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/151 Safari/537.36',
+              'Accept': 'application/zip, application/octet-stream, text/html;q=0.9, */*;q=0.8',
+              'Accept-Language': 'nl-NL,nl;q=0.9,en;q=0.8',
+          }
+
+          def inspect_url(url, read_bytes=8192):
+              req = urllib.request.Request(url, headers=headers)
+              with urllib.request.urlopen(req, timeout=90) as response:
+                  first = response.read(read_bytes)
+                  info = {
+                      'status': getattr(response, 'status', None),
+                      'final_url': response.geturl(),
+                      'content_type': response.headers.get('Content-Type'),
+                      'content_length': response.headers.get('Content-Length'),
+                      'content_disposition': response.headers.get('Content-Disposition'),
+                      'first': first,
+                  }
+              return info
+
+          spotler = inspect_url(shape_archive.SHAPE_DOWNLOAD_URL)
+          print('SPOTLER_STATUS=', spotler['status'])
+          print('SPOTLER_FINAL_URL=', spotler['final_url'])
+          print('SPOTLER_CONTENT_TYPE=', spotler['content_type'])
+          print('SPOTLER_FIRST_32_HEX=', spotler['first'][:32].hex())
+          print('SPOTLER_ZIP_MAGIC=', spotler['first'].startswith(b'PK\x03\x04'))
+
+          meta_target = None
+          if not spotler['first'].startswith(b'PK\x03\x04'):
+              text = spotler['first'].decode('utf-8', errors='replace')
               compact = re.sub(r'\s+', ' ', html.unescape(text))
-              print('BODY_PREVIEW=', compact[:2000])
-              urls = re.findall(r'https?://[^\s\"\'<>]+', text)
-              print('URL_CANDIDATES=', urls[:20])
-              raise SystemExit('Spotler response is not a ZIP; diagnostic above shows the actual response.')
+              print('SPOTLER_BODY_PREVIEW=', compact[:2000])
+              match = re.search(
+                  r'http-equiv=[\"\']?refresh[\"\']?[^>]*content=[\"\'][^\"\']*url=([^\"\'>]+)',
+                  text,
+                  flags=re.IGNORECASE,
+              )
+              if match:
+                  meta_target = html.unescape(match.group(1).strip())
+              else:
+                  urls = re.findall(r'https?://[^\s\"\'<>]+', text)
+                  meta_target = urls[0] if urls else None
+          print('META_TARGET=', meta_target)
+
+          if meta_target:
+              target = inspect_url(meta_target, read_bytes=64)
+              print('META_TARGET_STATUS=', target['status'])
+              print('META_TARGET_CONTENT_TYPE=', target['content_type'])
+              print('META_TARGET_CONTENT_LENGTH=', target['content_length'])
+              print('META_TARGET_ZIP_MAGIC=', target['first'].startswith(b'PK\x03\x04'))
+
+          bucket_base = 'https://enxp433-opendata-publications.s3.eu-west-1.amazonaws.com/'
+          list_url = bucket_base + '?list-type=2&prefix=' + urllib.parse.quote('Open_Asset_Data_Elektra')
+          discovered = []
+          try:
+              req = urllib.request.Request(list_url, headers=headers)
+              with urllib.request.urlopen(req, timeout=60) as response:
+                  listing = response.read(2 * 1024 * 1024)
+              root = ET.fromstring(listing)
+              for node in root.findall('.//{*}Contents/{*}Key'):
+                  if node.text:
+                      discovered.append(node.text.strip())
+              print('S3_LIST_KEYS=', discovered)
+          except Exception as exc:
+              print('S3_LIST_ERROR=', repr(exc))
+
+          candidates = [
+              'Open_Asset_Data_Elektra_SHAPE.zip',
+              'Open_Asset_Data_Elektra_Shape.zip',
+              'Open_Asset_Data_Elektra_SHP.zip',
+              'Open_Asset_Data_Elektra_shape.zip',
+              'Open_Asset_Data_Elektra.zip',
+          ]
+          for key in discovered:
+              low = key.casefold()
+              if key not in candidates and low.endswith('.zip') and ('shape' in low or 'shp' in low):
+                  candidates.insert(0, key)
+
+          working_shape_url = None
+          for key in candidates:
+              url = bucket_base + urllib.parse.quote(key)
+              try:
+                  req = urllib.request.Request(url, headers={**headers, 'Range': 'bytes=0-63'})
+                  with urllib.request.urlopen(req, timeout=60) as response:
+                      first = response.read(64)
+                      status = getattr(response, 'status', None)
+                      ctype = response.headers.get('Content-Type')
+                      length = response.headers.get('Content-Length')
+                  print('CANDIDATE=', key, 'STATUS=', status, 'TYPE=', ctype, 'LENGTH=', length, 'ZIP=', first.startswith(b'PK\x03\x04'))
+                  if first.startswith(b'PK\x03\x04') and working_shape_url is None:
+                      working_shape_url = url
+              except urllib.error.HTTPError as exc:
+                  print('CANDIDATE=', key, 'HTTP=', exc.code)
+              except Exception as exc:
+                  print('CANDIDATE=', key, 'ERROR=', repr(exc))
+
+          print('WORKING_SHAPE_URL=', working_shape_url)
+          if not working_shape_url:
+              raise SystemExit('No public SHAPE ZIP object found in the tested Enexis S3 location.')
 
           with tempfile.TemporaryDirectory() as temp_dir:
-              archive_path = os.path.join(temp_dir, 'enexis.zip')
+              archive_path = os.path.join(temp_dir, 'enexis-shape.zip')
               extracted = os.path.join(temp_dir, 'extracted')
-              print('FULL_DOWNLOAD_START')
-              shape_archive.download_archive(archive_path)
-              print('FULL_DOWNLOAD_BYTES=', os.path.getsize(archive_path))
-              print('ZIPFILE_VALID=', zipfile.is_zipfile(archive_path))
+              req = urllib.request.Request(working_shape_url, headers=headers)
+              with urllib.request.urlopen(req, timeout=180) as response, open(archive_path, 'wb') as output:
+                  while True:
+                      chunk = response.read(4 * 1024 * 1024)
+                      if not chunk:
+                          break
+                      output.write(chunk)
+              print('FULL_SHAPE_DOWNLOAD_BYTES=', os.path.getsize(archive_path))
+              print('FULL_SHAPE_ZIP_VALID=', zipfile.is_zipfile(archive_path))
               shapes = shape_archive.extract_target_folder(archive_path, extracted)
               print('NOORD_SHP=', shapes['noord'])
               print('ZUID_SHP=', shapes['zuid'])
@@ -76,7 +158,7 @@ jobs:
                       timeout=180,
                   )
                   print('OGRINFO_' + region.upper() + '_RC=', result.returncode)
-                  print('OGRINFO_' + region.upper() + '_OUT=', result.stdout[:5000])
+                  print('OGRINFO_' + region.upper() + '_OUT=', result.stdout[:7000])
                   if result.returncode != 0:
                       raise SystemExit('ogrinfo failed for ' + region)
           PY
