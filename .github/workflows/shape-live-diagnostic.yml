@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - debug/live-shape-download
+  pull_request:
 
 jobs:
   diagnose:
