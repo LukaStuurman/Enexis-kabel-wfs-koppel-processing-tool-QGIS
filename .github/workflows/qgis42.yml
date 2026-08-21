@@ -89,6 +89,8 @@ jobs:
           assert selected == [("noord", "n.shp"), ("zuid", "z.shp")]
           assert shape_processor._name_score("label") == 100
           assert shape_processor._name_score("kabelgroep") >= 80
+          assert shape_processor._normalize_shape_label("Kabelgroep: TEST-01") == "TEST-01"
+          assert shape_processor._normalize_shape_label("Kabelgroup: TEST-02") == "TEST-02"
 
           properties = {
               "object_id": 1,
@@ -99,6 +101,10 @@ jobs:
           geometry_json = '{"type":"LineString","coordinates":[[100000,400000],[100010,400000]]}'
           geometry = QgsJsonUtils.geometryFromGeoJson(geometry_json)
           assert not geometry.isNull()
+          assert round(geometry.length(), 2) == 10.0
+          assert not geometry.isMultipart()
+          geometry.convertToMultiType()
+          assert geometry.isMultipart()
           assert round(geometry.length(), 2) == 10.0
 
           dxf = SplitNaarDXF()
