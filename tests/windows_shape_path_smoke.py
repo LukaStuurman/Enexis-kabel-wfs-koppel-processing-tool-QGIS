@@ -1,6 +1,10 @@
 import pathlib
+import sys
 import tempfile
 import zipfile
+
+ROOT = pathlib.Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
 
 import shape_archive
 
