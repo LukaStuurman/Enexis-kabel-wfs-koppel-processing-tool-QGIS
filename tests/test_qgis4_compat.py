@@ -27,10 +27,10 @@ class Qgis42CompatibilityTests(unittest.TestCase):
         self.assertNotIn("QgsWkbTypes.LineString", text)
         self.assertIn("Qgis.WkbType.MultiLineString", text)
 
-    def test_metadata_requires_qgis_42_and_v0152(self):
+    def test_metadata_requires_qgis_42_and_v0153(self):
         text = (ROOT / "metadata.txt").read_text(encoding="utf-8")
         self.assertIn("qgisMinimumVersion=4.2", text)
-        self.assertIn("version=0.15.2", text)
+        self.assertIn("version=0.15.3", text)
         self.assertIn("SHAPE Noord", text)
 
     def test_provider_uses_source_selecting_v015_algorithm(self):
@@ -76,6 +76,9 @@ class Qgis42CompatibilityTests(unittest.TestCase):
         self.assertIn("download_archive", text)
         self.assertIn("zipfile.is_zipfile", text)
         self.assertIn("discover_shape_files", text)
+        self.assertIn('EXTRACTED_NAME = "shape_{0}"', text)
+        self.assertIn('EXTRACT_STAGE_PREFIX = "sx_"', text)
+        self.assertIn("build_target = build_root", text)
         self.assertIn('"noord"', text)
         self.assertIn('"zuid"', text)
         self.assertIn('(\".dbf\", \".shx\", \".prj\")', text)

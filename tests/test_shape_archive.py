@@ -1,5 +1,6 @@
 import importlib.util
 import io
+import ntpath
 import pathlib
 import sys
 import tempfile
@@ -53,6 +54,50 @@ class ShapeArchiveTests(unittest.TestCase):
         self.assertNotIn("_CSV.zip", shape_archive.SHAPE_DOWNLOAD_URL)
         self.assertIn(shape_archive.DOWNLOAD_ID, shape_archive.ARCHIVE_NAME)
         self.assertIn(shape_archive.DOWNLOAD_ID, shape_archive.EXTRACTED_NAME)
+
+    def test_detects_qgis_generated_processing_cache_folder(self):
+        generated = (
+            r"C:\Users\TestUser\AppData\Local\Temp\processing_abcd1234"
+            r"\0123456789abcdef0123456789abcdef\CACHE_FOLDER"
+        )
+        self.assertTrue(shape_archive._is_qgis_processing_temp_cache(generated))
+        self.assertFalse(
+            shape_archive._is_qgis_processing_temp_cache(r"C:\EnexisCache")
+        )
+        self.assertFalse(
+            shape_archive._is_qgis_processing_temp_cache(
+                r"C:\Project\processing_notes\CACHE_FOLDER_CUSTOM"
+            )
+        )
+
+    def test_windows_qgis_temp_paths_stay_below_safe_limit(self):
+        # Synthetic path with the same shape as a deep QGIS Processing temp path.
+        cache_root = (
+            r"C:\Users\TestUserLongCompanyProfile\AppData\Local\Temp\processing_abcdefgh"
+            r"\0123456789abcdef0123456789abcdef\CACHE_FOLDER\enexis_shape_source"
+        )
+        filename = "imkl_elektriciteitskabel_e_lv_map_cable_zuid_ligging.dbf"
+
+        old_path = ntpath.join(
+            cache_root,
+            "enexis_shape_extract_12345678",
+            shape_archive.TARGET_FOLDER,
+            filename,
+        )
+        new_stage_path = ntpath.join(
+            cache_root,
+            shape_archive.EXTRACT_STAGE_PREFIX + "12345678",
+            filename,
+        )
+        new_cached_path = ntpath.join(
+            cache_root,
+            shape_archive.EXTRACTED_NAME,
+            filename,
+        )
+
+        self.assertGreaterEqual(len(old_path), 260)
+        self.assertLess(len(new_stage_path), shape_archive.WINDOWS_SAFE_PATH_LIMIT)
+        self.assertLess(len(new_cached_path), shape_archive.WINDOWS_SAFE_PATH_LIMIT)
 
     def test_streamed_download_writes_valid_zip_atomically(self):
         data = self._valid_zip_bytes()
