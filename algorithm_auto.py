@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import gc
 import json
+import time
 from collections import defaultdict
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
@@ -38,6 +39,7 @@ class KoppelWfsCsvAutoAlgorithm(KoppelWfsCsvAlgorithm):
 
     WFS_URL = "https://opendata.enexis.nl/geoserver/wfs"
     TYPE_HINT = "e_lv_map_cable"
+    GEOMETRY_FIELD = "geografischeligging"
     EXTENT = "EXTENT"
     RD_EPSG = 28992
     RD_AUTHID = "EPSG:28992"
@@ -333,6 +335,20 @@ class KoppelWfsCsvAutoAlgorithm(KoppelWfsCsvAlgorithm):
         )
         return "{0} IN ({1})".format(label_field, quoted)
 
+    def _extent_label_filter(self, label_field, labels, extent):
+        # This GeoServer rejects separate bbox + cql_filter parameters. Put the
+        # spatial predicate inside CQL so it can use the spatial index and avoid
+        # a nationwide label scan for a tiny canvas extent.
+        spatial = "BBOX({0},{1},{2},{3},{4},'{5}')".format(
+            self.GEOMETRY_FIELD,
+            extent.xMinimum(),
+            extent.yMinimum(),
+            extent.xMaximum(),
+            extent.yMaximum(),
+            self.RD_AUTHID,
+        )
+        return spatial + " AND " + self._label_filter(label_field, labels)
+
     @staticmethod
     def _chunks(values, size):
         values = list(values)
@@ -342,7 +358,12 @@ class KoppelWfsCsvAutoAlgorithm(KoppelWfsCsvAlgorithm):
         params = self._getfeature_params(
             type_name, self.MAX_GEOMETRY_FEATURES_PER_BATCH + 1
         )
-        params["cql_filter"] = self._label_filter(label_field, labels)
+        if extent is None:
+            params["cql_filter"] = self._label_filter(label_field, labels)
+        else:
+            params["cql_filter"] = self._extent_label_filter(
+                label_field, labels, extent
+            )
         payload = self._request_json(params, self.MAX_GEOMETRY_RESPONSE_BYTES)
         features = payload.get("features") or []
         if len(features) > self.MAX_GEOMETRY_FEATURES_PER_BATCH:
@@ -452,8 +473,73 @@ class KoppelWfsCsvAutoAlgorithm(KoppelWfsCsvAlgorithm):
         return ", ".join(items[:limit]) if items else "(geen)"
 
     def processAlgorithm(self, parameters, context, feedback):
+        total_started = time.perf_counter()
         csv_path = self.parameterAsFile(parameters, self.CSV_FILE, context)
-        csv_fieldnames, csv_rows = self._read_csv(csv_path)
+        source_crs = QgsCoordinateReferenceSystem.fromEpsgId(self.RD_EPSG)
+        extent = None
+        if parameters.get(self.EXTENT) not in (None, ""):
+            extent = self.parameterAsExtent(parameters, self.EXTENT, context, source_crs)
+            if extent is None or extent.isNull() or extent.isEmpty():
+                extent = None
+
+        matched_csv = set()
+        found_labels = set()
+        total_geometry_records = 0
+        total_matches = 0
+        type_name = None
+        label_field = None
+        scanned_count = 0
+        schema_seconds = 0.0
+        label_scan_seconds = 0.0
+        geometry_seconds = 0.0
+
+        # In extent mode WFS labels must come first. They form the tiny allowlist
+        # used while streaming a nationwide CSV, preventing millions of complete
+        # 22-column row dictionaries from entering memory.
+        if extent is not None:
+            feedback.setProgressText("WFS-schema en labelveld controleren...")
+            try:
+                started = time.perf_counter()
+                type_name, label_field = self._resolve_type_and_label_field(
+                    extent, feedback
+                )
+                schema_seconds = time.perf_counter() - started
+
+                feedback.setProgressText(
+                    "Alleen WFS-labels binnen schermextent ophalen..."
+                )
+                started = time.perf_counter()
+                extent_labels, scanned_count = self._fetch_extent_labels(
+                    type_name, label_field, extent
+                )
+                label_scan_seconds = time.perf_counter() - started
+                found_labels.update(extent_labels)
+            except DirectWfsError as exc:
+                raise QgsProcessingException(str(exc)) from exc
+
+        feedback.setProgressText("CSV één keer streamen en relevante rijen selecteren...")
+        csv_started = time.perf_counter()
+        csv_allowed_labels = found_labels if extent is not None else None
+        csv_fieldnames, csv_rows, csv_stats = self._read_csv(
+            csv_path, allowed_labels=csv_allowed_labels
+        )
+        csv_seconds = time.perf_counter() - csv_started
+        if extent is not None:
+            feedback.pushInfo(
+                "CSV-selectie: {0} rij(en) gelezen, {1} rij(en) voor de {2} "
+                "WFS-label(s) in de extent bewaard. Rijen buiten de extent worden "
+                "niet als niet-gekoppeld uitgevoerd.".format(
+                    csv_stats["total_rows"],
+                    csv_stats["retained_rows"],
+                    len(found_labels),
+                )
+            )
+        else:
+            feedback.pushInfo(
+                "Geen extent gekozen: alle {0} CSV-rij(en) zijn ingelezen.".format(
+                    csv_stats["total_rows"]
+                )
+            )
 
         csv_groups = defaultdict(list)
         csv_pre_unmatched = {}
@@ -465,13 +551,6 @@ class KoppelWfsCsvAutoAlgorithm(KoppelWfsCsvAlgorithm):
             else:
                 csv_groups[row["label"]].append((csv_idx, row["length_m"]))
 
-        source_crs = QgsCoordinateReferenceSystem.fromEpsgId(self.RD_EPSG)
-        extent = None
-        if parameters.get(self.EXTENT) not in (None, ""):
-            extent = self.parameterAsExtent(parameters, self.EXTENT, context, source_crs)
-            if extent is None or extent.isNull() or extent.isEmpty():
-                extent = None
-
         output_fields, csv_output_names, aux_names = self._output_fields(
             QgsFields(), csv_fieldnames
         )
@@ -480,7 +559,7 @@ class KoppelWfsCsvAutoAlgorithm(KoppelWfsCsvAlgorithm):
             self.OUTPUT,
             context,
             output_fields,
-            Qgis.WkbType.LineString,
+            Qgis.WkbType.MultiLineString,
             source_crs,
         )
         if sink is None:
@@ -500,83 +579,79 @@ class KoppelWfsCsvAutoAlgorithm(KoppelWfsCsvAlgorithm):
                 self.invalidSinkError(parameters, self.UNMATCHED_CSV)
             )
 
-        matched_csv = set()
-        found_labels = set()
-        total_geometry_records = 0
-        total_matches = 0
-
-        if csv_groups:
+        if extent is not None:
+            common_labels = sorted(found_labels & set(csv_groups.keys()))
+            feedback.pushInfo(
+                "Extent-scan: {0} kabeldeel-labels gelezen, {1} unieke labels, "
+                "{2} label(s) komen ook in de CSV voor.".format(
+                    scanned_count, len(found_labels), len(common_labels)
+                )
+            )
+        elif csv_groups:
             feedback.setProgressText("WFS-schema en labelveld controleren...")
             try:
+                started = time.perf_counter()
                 type_name, label_field = self._resolve_type_and_label_field(
                     extent, feedback
                 )
-
-                if extent is not None:
-                    feedback.setProgressText(
-                        "Alleen WFS-labels binnen schermextent ophalen..."
-                    )
-                    extent_labels, scanned_count = self._fetch_extent_labels(
-                        type_name, label_field, extent
-                    )
-                    found_labels.update(extent_labels)
-                    common_labels = sorted(extent_labels & set(csv_groups.keys()))
-                    feedback.pushInfo(
-                        "Extent-scan: {0} kabeldeel-labels gelezen, {1} unieke labels, "
-                        "{2} label(s) komen ook in de CSV voor.".format(
-                            scanned_count, len(extent_labels), len(common_labels)
-                        )
-                    )
-                else:
-                    common_labels = sorted(csv_groups.keys())
-                    found_labels.update(common_labels)
-                    feedback.pushInfo(
-                        "Geen extent gekozen: geometrie wordt alleen voor CSV-labels opgehaald."
-                    )
-
-                if not common_labels:
-                    feedback.pushInfo(
-                        "Geen exacte labelovereenkomst. WFS-voorbeeld: {0}".format(
-                            self._sample(found_labels)
-                        )
-                    )
-                    feedback.pushInfo(
-                        "CSV-voorbeeld: {0}".format(self._sample(csv_groups.keys()))
-                    )
-                else:
-                    batches = self._chunks(
-                        common_labels, self.LABELS_PER_GEOMETRY_REQUEST
-                    )
-                    for batch_index, labels in enumerate(batches):
-                        if feedback.isCanceled():
-                            break
-                        feedback.setProgressText(
-                            "Geometrie voor matches ophalen {0}/{1}...".format(
-                                batch_index + 1, len(batches)
-                            )
-                        )
-                        records = self._fetch_geometry_records(
-                            type_name, label_field, labels, extent
-                        )
-                        written, matched = self._write_records(
-                            records,
-                            csv_groups,
-                            csv_rows,
-                            output_fields,
-                            csv_output_names,
-                            aux_names,
-                            sink,
-                            matched_csv,
-                        )
-                        total_geometry_records += written
-                        total_matches += matched
-                        del records
-                        gc.collect()
-                        feedback.setProgress(
-                            80.0 * (batch_index + 1) / max(1, len(batches))
-                        )
+                schema_seconds = time.perf_counter() - started
             except DirectWfsError as exc:
                 raise QgsProcessingException(str(exc)) from exc
+            common_labels = sorted(csv_groups.keys())
+            found_labels.update(common_labels)
+            feedback.pushInfo(
+                "Geen extent gekozen: geometrie wordt alleen voor CSV-labels opgehaald."
+            )
+        else:
+            common_labels = []
+
+        if not common_labels:
+            feedback.pushInfo(
+                "Geen exacte labelovereenkomst. WFS-voorbeeld: {0}".format(
+                    self._sample(found_labels)
+                )
+            )
+            csv_example = csv_groups.keys() or csv_stats["sample_labels"]
+            feedback.pushInfo(
+                "CSV-voorbeeld: {0}".format(self._sample(csv_example))
+            )
+        else:
+            batches = self._chunks(
+                common_labels, self.LABELS_PER_GEOMETRY_REQUEST
+            )
+            geometry_started = time.perf_counter()
+            try:
+                for batch_index, labels in enumerate(batches):
+                    if feedback.isCanceled():
+                        break
+                    feedback.setProgressText(
+                        "Geometrie voor matches ophalen {0}/{1}...".format(
+                            batch_index + 1, len(batches)
+                        )
+                    )
+                    records = self._fetch_geometry_records(
+                        type_name, label_field, labels, extent
+                    )
+                    written, matched = self._write_records(
+                        records,
+                        csv_groups,
+                        csv_rows,
+                        output_fields,
+                        csv_output_names,
+                        aux_names,
+                        sink,
+                        matched_csv,
+                    )
+                    total_geometry_records += written
+                    total_matches += matched
+                    del records
+                    gc.collect()
+                    feedback.setProgress(
+                        80.0 * (batch_index + 1) / max(1, len(batches))
+                    )
+            except DirectWfsError as exc:
+                raise QgsProcessingException(str(exc)) from exc
+            geometry_seconds = time.perf_counter() - geometry_started
 
         unmatched_indices = [
             index for index in range(len(csv_rows)) if index not in matched_csv
@@ -585,8 +660,6 @@ class KoppelWfsCsvAutoAlgorithm(KoppelWfsCsvAlgorithm):
             row = csv_rows[csv_idx]
             if csv_idx in csv_pre_unmatched:
                 reason = csv_pre_unmatched[csv_idx]
-            elif extent is not None and row["label"] not in found_labels:
-                reason = "GEEN_MATCH_BINNEN_EXTENT"
             elif row["label"] not in found_labels and extent is None:
                 reason = "GEEN_EXACT_LABEL_IN_WFS"
             else:
@@ -599,6 +672,16 @@ class KoppelWfsCsvAutoAlgorithm(KoppelWfsCsvAlgorithm):
             unmatched_sink.addFeature(feature, QgsFeatureSink.Flag.FastInsert)
 
         feedback.setProgress(100.0)
+        feedback.pushInfo(
+            "Timing: schema {0:.2f} s; labelscan {1:.2f} s; CSV {2:.2f} s; "
+            "WFS-geometrie {3:.2f} s; totaal {4:.2f} s.".format(
+                schema_seconds,
+                label_scan_seconds,
+                csv_seconds,
+                geometry_seconds,
+                time.perf_counter() - total_started,
+            )
+        )
         feedback.pushInfo(
             "Klaar: {0} relevante WFS-geometrie(ën) verwerkt, {1} koppeling(en), "
             "{2} CSV-rij(en) zonder match.".format(

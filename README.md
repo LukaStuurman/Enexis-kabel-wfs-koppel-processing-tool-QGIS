@@ -2,7 +2,19 @@
 
 QGIS Processing-plugin die Enexis `e_lv_map_cable`-kabellijnen **strikt 1-op-1** koppelt aan rijen uit een CSV-export.
 
-## Gebruik v0.8.0
+## Gebruik v0.9.0
+
+Versie **0.9.0** houdt een landelijke CSV in extentmodus niet meer volledig in
+het geheugen. De tool scant eerst de WFS-labels in het kaartvenster en streamt
+daarna de CSV één keer. Alleen CSV-rijen met een label dat werkelijk in die
+extent voorkomt worden bewaard en eventueel als niet-gekoppeld uitgevoerd.
+Rijen voor de rest van Nederland komen in extentmodus dus niet meer in de
+uitvoer `Niet-gekoppelde CSV-rijen`.
+
+Hierdoor bepalen de omvang van de gekozen extent en het aantal relevante labels
+het geheugengebruik, niet langer het totale aantal landelijke CSV-rijen.
+
+## Eerdere verbetering in v0.8.0
 
 Versie **0.8.0** vervangt de oude extent-first aanpak waarbij eerst alle volledige kabelgeometrieën in het scherm werden opgehaald. Dat kon traag zijn en bovendien matches missen wanneer de extent meer kabeldelen bevatte dan de veiligheidslimiet.
 
@@ -66,7 +78,15 @@ Na de labelscan wordt de doorsnede bepaald:
 
 `WFS-labels binnen extent ∩ CSV Kabel Subgroep`
 
-Alleen voor deze labels wordt geometrie opgevraagd. De geometry-response is begrensd op **8 MB** en maximaal **1.000 features per batch**.
+Alleen voor deze labels wordt geometrie opgevraagd. In extentmodus combineert de
+plugin de ruimtelijke begrenzing en het labelfilter in één CQL-expressie:
+
+`BBOX(geografischeligging, ...) AND label IN (...)`
+
+De Enexis GeoServer accepteert voor deze laag geen losse `bbox` en `cql_filter`
+in dezelfde request. De gecombineerde CQL-vorm voorkomt toch een landelijke
+labelscan. De geometry-response is begrensd op **8 MB** en maximaal **1.000
+features per batch**.
 
 Omdat de tweede request op label werkt, wordt iedere teruggekomen geometrie lokaal opnieuw tegen de gekozen extent gecontroleerd. Een eventueel gelijk label elders kan daardoor niet in de match terechtkomen.
 

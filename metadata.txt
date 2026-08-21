@@ -1,11 +1,11 @@
 [general]
 name=Enexis Kabel WFS-CSV Koppeling
 description=QGIS 4.2 Processing-tool met snelle tweestaps extent-scan: eerst alleen WFS-labels in beeld, daarna alleen geometrie voor CSV-matches.
-version=0.8.0
+version=0.9.0
 qgisMinimumVersion=4.2
 author=LukaStuurman
 email=
-about=QGIS 4.2 low-resource tool. Bij een gekozen extent wordt eerst uitsluitend het labelattribuut via WFS opgehaald. Alleen labels die ook in de CSV voorkomen krijgen daarna een geometrie-opvraag en 1-op-1 lengtematching. Geen parallelle WFS-downloads.
+about=QGIS 4.2 low-resource tool. Bij een gekozen extent worden eerst uitsluitend WFS-labels opgehaald. De landelijke CSV wordt daarna één keer gestreamd en alleen rijen voor labels in de extent blijven in geheugen. Alleen die labels krijgen geometrie-opvragen en 1-op-1 lengtematching.
 category=Vector
 experimental=False
 deprecated=False

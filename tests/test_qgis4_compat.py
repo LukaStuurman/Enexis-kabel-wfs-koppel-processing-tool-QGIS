@@ -16,7 +16,7 @@ class Qgis42CompatibilityTests(unittest.TestCase):
     def test_no_legacy_wkb_enum_in_active_algorithm(self):
         text = (ROOT / "algorithm_auto.py").read_text(encoding="utf-8")
         self.assertNotIn("QgsWkbTypes.LineString", text)
-        self.assertIn("Qgis.WkbType.LineString", text)
+        self.assertIn("Qgis.WkbType.MultiLineString", text)
 
     def test_modern_qgis42_field_types(self):
         text = (ROOT / "algorithm.py").read_text(encoding="utf-8")
@@ -24,10 +24,10 @@ class Qgis42CompatibilityTests(unittest.TestCase):
         self.assertIn("QMetaType.Type.Double", text)
         self.assertIn("QMetaType.Type.Int", text)
 
-    def test_metadata_requires_qgis_42_and_v08(self):
+    def test_metadata_requires_qgis_42_and_v09(self):
         text = (ROOT / "metadata.txt").read_text(encoding="utf-8")
         self.assertIn("qgisMinimumVersion=4.2", text)
-        self.assertIn("version=0.8.0", text)
+        self.assertIn("version=0.9.0", text)
 
     def test_wfs_downloads_are_not_parallel(self):
         text = (ROOT / "algorithm_auto.py").read_text(encoding="utf-8")
@@ -44,10 +44,28 @@ class Qgis42CompatibilityTests(unittest.TestCase):
 
     def test_geometry_only_for_common_labels(self):
         text = (ROOT / "algorithm_auto.py").read_text(encoding="utf-8")
-        self.assertIn("common_labels = sorted(extent_labels & set(csv_groups.keys()))", text)
+        self.assertIn("common_labels = sorted(found_labels & set(csv_groups.keys()))", text)
         self.assertIn("def _fetch_geometry_records", text)
         self.assertIn("LABELS_PER_GEOMETRY_REQUEST = 10", text)
         self.assertIn("cql_filter", text)
+        self.assertIn("def _extent_label_filter", text)
+        self.assertIn("BBOX({0},{1},{2},{3},{4},'{5}')", text)
+        self.assertIn('GEOMETRY_FIELD = "geografischeligging"', text)
+
+    def test_extent_filters_nationwide_csv_before_copying_rows(self):
+        helper = (ROOT / "algorithm.py").read_text(encoding="utf-8")
+        active = (ROOT / "algorithm_auto.py").read_text(encoding="utf-8")
+        self.assertIn("def _read_csv(self, path, allowed_labels=None)", helper)
+        self.assertIn("if allowed is not None and label not in allowed:", helper)
+        self.assertIn("csv_allowed_labels = found_labels if extent is not None else None", active)
+        self.assertIn("allowed_labels=csv_allowed_labels", active)
+        self.assertIn("Rijen buiten de extent worden", active)
+
+    def test_phase_timings_are_reported(self):
+        text = (ROOT / "algorithm_auto.py").read_text(encoding="utf-8")
+        self.assertIn("Timing: schema", text)
+        self.assertIn("labelscan", text)
+        self.assertIn("WFS-geometrie", text)
 
     def test_geometry_parsed_directly_from_geojson(self):
         text = (ROOT / "algorithm_auto.py").read_text(encoding="utf-8")

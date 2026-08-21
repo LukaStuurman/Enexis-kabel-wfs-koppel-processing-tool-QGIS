@@ -50,8 +50,15 @@ class KoppelWfsCsvAlgorithm(QgsProcessingAlgorithm):
         except csv.Error:
             return ";"
 
-    def _read_csv(self, path):
+    def _read_csv(self, path, allowed_labels=None):
+        """Read CSV rows, optionally retaining only labels found in an extent.
+
+        ``allowed_labels`` is applied before the 22-column values dictionary is
+        created. This keeps a nationwide CSV cheap in extent mode while still
+        scanning it once with the standards-compliant CSV parser.
+        """
         delimiter = self._detect_delimiter(path)
+        allowed = None if allowed_labels is None else set(allowed_labels)
         with open(path, "r", encoding="utf-8-sig", newline="") as handle:
             reader = csv.DictReader(handle, delimiter=delimiter)
             fieldnames = reader.fieldnames or []
@@ -64,9 +71,17 @@ class KoppelWfsCsvAlgorithm(QgsProcessingAlgorithm):
                 raise QgsProcessingException(
                     "CSV mist verplichte kolom(men): " + ", ".join(missing)
                 )
-
             rows = []
+            total_rows = 0
+            sample_labels = set()
             for row_number, row in enumerate(reader, start=2):
+                total_rows += 1
+                label = normalize_label(row.get(self.CSV_LABEL_FIELD))
+                if label and len(sample_labels) < 12:
+                    sample_labels.add(label)
+                if allowed is not None and label not in allowed:
+                    continue
+
                 raw_length = row.get(self.CSV_LENGTH_FIELD)
                 try:
                     length_m = round(parse_decimal(raw_length), 2)
@@ -81,12 +96,17 @@ class KoppelWfsCsvAlgorithm(QgsProcessingAlgorithm):
                         "values": {
                             name: (row.get(name) or "") for name in fieldnames
                         },
-                        "label": normalize_label(row.get(self.CSV_LABEL_FIELD)),
+                        "label": label,
                         "length_m": length_m,
                         "length_error": length_error,
                     }
                 )
-        return fieldnames, rows
+        stats = {
+            "total_rows": total_rows,
+            "retained_rows": len(rows),
+            "sample_labels": sorted(sample_labels),
+        }
+        return fieldnames, rows, stats
 
     @staticmethod
     def _unique_field_name(fields, wanted):
