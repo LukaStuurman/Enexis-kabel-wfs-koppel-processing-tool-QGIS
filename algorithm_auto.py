@@ -1,21 +1,22 @@
 # -*- coding: utf-8 -*-
-"""Fast and crash-safe automatic Enexis WFS/CSV matching algorithm for QGIS 4.2."""
+"""Low-resource Enexis WFS/CSV matching algorithm for QGIS 4.2."""
 
 from __future__ import annotations
 
+import gc
 from collections import defaultdict
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 from xml.etree import ElementTree
 
-from qgis.PyQt.QtCore import QSettings
+from qgis.PyQt.QtCore import QMetaType, QSettings
 from qgis.core import (
     Qgis,
     QgsCoordinateReferenceSystem,
     QgsFeature,
     QgsFeatureSink,
+    QgsField,
     QgsFields,
     QgsJsonUtils,
     QgsProcessingException,
@@ -33,16 +34,21 @@ class DirectWfsError(RuntimeError):
 
 
 class KoppelWfsCsvAutoAlgorithm(KoppelWfsCsvAlgorithm):
-    """Fetch filtered Enexis cables directly as GeoJSON and match them to CSV."""
-
     WFS_URL = "https://opendata.enexis.nl/geoserver/wfs"
     TYPE_NAME_CONTAINS = "e_lv_map_cable"
     LABEL_FIELD = "label"
     EXTENT = "EXTENT"
     RD_EPSG = 28992
     RD_AUTHID = "EPSG:28992"
-    LABELS_PER_REQUEST = 40
-    MAX_HTTP_WORKERS = 4
+
+    # Hard safety limits. The plugin must fail safely instead of exhausting RAM.
+    LABELS_PER_REQUEST = 5
+    MAX_FEATURES_PER_BATCH = 500
+    MAX_RESPONSE_BYTES = 8 * 1024 * 1024
+    MAX_CAPABILITIES_BYTES = 2 * 1024 * 1024
+    HTTP_TIMEOUT_SECONDS = 30
+    MAX_LABELS_WITHOUT_EXTENT = 20
+
     SETTINGS_TYPE_KEY = "enexiskabel/wfs_type_name"
     _cached_type_name = None
 
@@ -50,14 +56,15 @@ class KoppelWfsCsvAutoAlgorithm(KoppelWfsCsvAlgorithm):
         return "koppel_enexis_wfs_kabels_automatisch_aan_csv"
 
     def displayName(self):
-        return self.tr("Koppel Enexis WFS-kabels automatisch aan CSV (1-op-1)")
+        return self.tr("Koppel Enexis WFS-kabels automatisch aan CSV (low-resource)")
 
     def shortHelpString(self):
         return self.tr(
-            "Je kiest de CSV en optioneel een extent. De plugin gebruikt geen live "
-            "QGIS-WFS-laag meer, maar stuurt rechtstreeks een gefilterd GetFeature-"
-            "verzoek naar Enexis en leest alleen het GeoJSON-resultaat in. Hierdoor "
-            "worden de schermextent en Kabel Subgroep al op de server toegepast."
+            "QGIS 4.2 low-resource variant. Er is maximaal één WFS-request tegelijk. "
+            "Kabelgroepen worden in kleine batches opgehaald, direct gekoppeld en daarna "
+            "uit het geheugen verwijderd. Gebruik bij voorkeur de huidige kaartcanvas-"
+            "extent. Bij een te grote response stopt de tool met een foutmelding in plaats "
+            "van extra geheugen te blijven gebruiken."
         )
 
     def createInstance(self):
@@ -75,9 +82,7 @@ class KoppelWfsCsvAutoAlgorithm(KoppelWfsCsvAlgorithm):
         self.addParameter(
             QgsProcessingParameterExtent(
                 self.EXTENT,
-                self.tr(
-                    "Beperk WFS tot scherm/gebied (optioneel; kies huidige kaartcanvas)"
-                ),
+                self.tr("Beperk WFS tot scherm/gebied (sterk aanbevolen)"),
                 optional=True,
             )
         )
@@ -93,16 +98,6 @@ class KoppelWfsCsvAutoAlgorithm(KoppelWfsCsvAlgorithm):
                 self.tr("Niet-gekoppelde CSV-rijen"),
             )
         )
-
-    @staticmethod
-    def _feature_type_names(xml_bytes):
-        root = ElementTree.fromstring(xml_bytes)
-        names = []
-        for feature_type in root.findall(".//{*}FeatureType"):
-            name_node = feature_type.find("{*}Name")
-            if name_node is not None and name_node.text:
-                names.append(name_node.text.strip())
-        return names
 
     @classmethod
     def _stored_type_name(cls):
@@ -123,51 +118,70 @@ class KoppelWfsCsvAutoAlgorithm(KoppelWfsCsvAlgorithm):
         else:
             settings.remove(cls.SETTINGS_TYPE_KEY)
 
-    def _discover_type_name(self, feedback):
-        cached = self._stored_type_name()
-        if cached:
-            feedback.pushInfo("WFS-laagnaam uit permanente cache: " + cached)
-            return cached
+    @staticmethod
+    def _feature_type_names(xml_bytes):
+        root = ElementTree.fromstring(xml_bytes)
+        names = []
+        for feature_type in root.findall(".//{*}FeatureType"):
+            name_node = feature_type.find("{*}Name")
+            if name_node is not None and name_node.text:
+                names.append(name_node.text.strip())
+        return names
 
-        capabilities_url = self.WFS_URL + "?" + urlencode(
+    @staticmethod
+    def _read_bounded(response, limit):
+        value = response.headers.get("Content-Length")
+        if value:
+            try:
+                size = int(value)
+            except ValueError:
+                size = 0
+            if size > limit:
+                raise DirectWfsError(
+                    "WFS-response is te groot ({0:.1f} MB). Zoom verder in of kies "
+                    "een kleinere extent.".format(size / 1048576)
+                )
+
+        data = response.read(limit + 1)
+        if len(data) > limit:
+            raise DirectWfsError(
+                "WFS-response is groter dan de veilige limiet van {0:.0f} MB. "
+                "Zoom verder in of kies een kleinere extent.".format(limit / 1048576)
+            )
+        return data
+
+    def _discover_type_name(self, feedback):
+        url = self.WFS_URL + "?" + urlencode(
             {
                 "service": "WFS",
-                "request": "GetCapabilities",
                 "version": "2.0.0",
+                "request": "GetCapabilities",
             }
         )
-        request = Request(
-            capabilities_url,
-            headers={"User-Agent": "QGIS Enexis Kabelkoppeling"},
-        )
+        request = Request(url, headers={"User-Agent": "QGIS Enexis Kabelkoppeling"})
         try:
-            with urlopen(request, timeout=30) as response:
-                xml_bytes = response.read()
-        except Exception as exc:
-            raise DirectWfsError(
-                "Kon Enexis WFS GetCapabilities niet ophalen: " + str(exc)
-            ) from exc
-
-        try:
+            with urlopen(request, timeout=self.HTTP_TIMEOUT_SECONDS) as response:
+                xml_bytes = self._read_bounded(
+                    response, self.MAX_CAPABILITIES_BYTES
+                )
             all_names = self._feature_type_names(xml_bytes)
+        except DirectWfsError:
+            raise
         except Exception as exc:
             raise DirectWfsError(
-                "Kon Enexis WFS GetCapabilities niet lezen: " + str(exc)
+                "Kon de Enexis WFS-laagnaam niet bepalen: " + str(exc)
             ) from exc
 
         needle = self.TYPE_NAME_CONTAINS.lower()
         candidates = [name for name in all_names if needle in name.lower()]
         if not candidates:
             raise DirectWfsError(
-                "Geen Enexis WFS-laag gevonden waarvan de naam 'e_lv_map_cable' bevat."
+                "Geen WFS-laag gevonden waarvan de naam 'e_lv_map_cable' bevat."
             )
-
-        exact_local = [
-            name for name in candidates if name.split(":")[-1].lower() == needle
-        ]
-        chosen = min(exact_local or candidates, key=lambda value: (len(value), value))
+        exact = [name for name in candidates if name.split(":")[-1].lower() == needle]
+        chosen = min(exact or candidates, key=lambda value: (len(value), value))
         self._store_type_name(chosen)
-        feedback.pushInfo("Automatisch gevonden WFS-laag: " + chosen)
+        feedback.pushInfo("WFS-laagnaam éénmalig gevonden en opgeslagen: " + chosen)
         return chosen
 
     @staticmethod
@@ -194,6 +208,7 @@ class KoppelWfsCsvAutoAlgorithm(KoppelWfsCsvAlgorithm):
             "outputFormat": "application/json",
             "srsName": self.RD_AUTHID,
             "cql_filter": self._cql_for_labels(labels),
+            "count": str(self.MAX_FEATURES_PER_BATCH + 1),
         }
         if extent is not None:
             params["bbox"] = "{0},{1},{2},{3},{4}".format(
@@ -205,8 +220,7 @@ class KoppelWfsCsvAutoAlgorithm(KoppelWfsCsvAlgorithm):
             )
         return self.WFS_URL + "?" + urlencode(params)
 
-    @staticmethod
-    def _http_get_geojson(url):
+    def _http_get_geojson(self, url):
         request = Request(
             url,
             headers={
@@ -215,117 +229,156 @@ class KoppelWfsCsvAutoAlgorithm(KoppelWfsCsvAlgorithm):
             },
         )
         try:
-            with urlopen(request, timeout=60) as response:
+            with urlopen(request, timeout=self.HTTP_TIMEOUT_SECONDS) as response:
+                data = self._read_bounded(response, self.MAX_RESPONSE_BYTES)
                 charset = response.headers.get_content_charset() or "utf-8"
-                text = response.read().decode(charset, errors="replace")
+        except DirectWfsError:
+            raise
         except HTTPError as exc:
             try:
-                detail = exc.read().decode("utf-8", errors="replace")[:500]
+                detail = exc.read(1000).decode("utf-8", errors="replace")[:500]
             except Exception:
                 detail = ""
             raise DirectWfsError(
                 f"WFS GetFeature HTTP {exc.code}: {detail or exc.reason}"
             ) from exc
         except URLError as exc:
-            raise DirectWfsError("WFS GetFeature netwerkfout: " + str(exc.reason)) from exc
+            raise DirectWfsError("WFS-netwerkfout: " + str(exc.reason)) from exc
         except Exception as exc:
             raise DirectWfsError("WFS GetFeature mislukt: " + str(exc)) from exc
 
+        text = data.decode(charset, errors="replace")
         if not text.lstrip().startswith("{"):
             raise DirectWfsError(
                 "WFS gaf geen GeoJSON terug: " + text.strip()[:500]
             )
         return text
 
+    def _parse_minimal_features(self, text):
+        fields = QgsFields()
+        fields.append(QgsField(self.LABEL_FIELD, QMetaType.Type.QString))
+        features = QgsJsonUtils.stringToFeatureList(text, fields)
+        if len(features) > self.MAX_FEATURES_PER_BATCH:
+            raise DirectWfsError(
+                "Meer dan {0} kabels in één WFS-batch. Zoom verder in of kies "
+                "een kleinere extent.".format(self.MAX_FEATURES_PER_BATCH)
+            )
+        return features
+
+    def _download_batch(self, type_name, labels, extent):
+        text = self._http_get_geojson(
+            self._build_getfeature_url(type_name, labels, extent)
+        )
+        try:
+            return self._parse_minimal_features(text)
+        finally:
+            del text
+
+    def _download_first_batch(self, labels, extent, feedback):
+        cached = self._stored_type_name()
+        type_name = cached or self.TYPE_NAME_CONTAINS
+        try:
+            features = self._download_batch(type_name, labels, extent)
+            self._store_type_name(type_name)
+            return type_name, features
+        except DirectWfsError as first_error:
+            self._store_type_name("")
+            if cached:
+                feedback.pushInfo("Opgeslagen WFS-laagnaam werkt niet; opnieuw zoeken.")
+            else:
+                feedback.pushInfo(
+                    "Directe laagnaam werkt niet; volledige typename éénmalig zoeken."
+                )
+            discovered = self._discover_type_name(feedback)
+            if discovered == type_name:
+                raise first_error
+            return discovered, self._download_batch(discovered, labels, extent)
+
     @staticmethod
     def _chunks(values, size):
+        values = list(values)
         return [values[pos : pos + size] for pos in range(0, len(values), size)]
 
-    def _download_geojson_batches(self, type_name, labels, extent, feedback):
-        batches = self._chunks(sorted(labels), self.LABELS_PER_REQUEST)
-        if not batches:
-            return []
-
-        urls = [self._build_getfeature_url(type_name, batch, extent) for batch in batches]
-        if len(urls) == 1:
-            feedback.pushInfo("1 directe gefilterde WFS GetFeature-oproep uitvoeren...")
-            return [self._http_get_geojson(urls[0])]
-
-        workers = min(self.MAX_HTTP_WORKERS, len(urls))
-        feedback.pushInfo(
-            f"{len(urls)} directe WFS-oproepen uitvoeren met maximaal {workers} HTTP-threads..."
-        )
-        results = [None] * len(urls)
-        with ThreadPoolExecutor(max_workers=workers) as executor:
-            future_to_index = {
-                executor.submit(self._http_get_geojson, url): index
-                for index, url in enumerate(urls)
-            }
-            completed = 0
-            for future in as_completed(future_to_index):
-                index = future_to_index[future]
-                results[index] = future.result()
-                completed += 1
-                feedback.setProgress(min(45.0, completed * 45.0 / len(urls)))
-        return results
-
-    def _fetch_with_type_fallback(self, labels, extent, feedback):
-        cached = self._stored_type_name()
-        first_type = cached or self.TYPE_NAME_CONTAINS
-        try:
-            texts = self._download_geojson_batches(first_type, labels, extent, feedback)
-            self._store_type_name(first_type)
-            if cached:
-                feedback.pushInfo("WFS-laagnaamcache werkte zonder GetCapabilities.")
-            else:
-                feedback.pushInfo(
-                    "Ongekwalificeerde laagnaam werkte direct; GetCapabilities overgeslagen."
-                )
-            return first_type, texts
-        except DirectWfsError as first_error:
-            if cached:
-                feedback.pushInfo(
-                    "Opgeslagen WFS-laagnaam werkte niet meer; opnieuw detecteren..."
-                )
-                self._store_type_name("")
-            else:
-                feedback.pushInfo(
-                    "Directe laagnaam werkte niet; éénmalig volledige typename zoeken..."
-                )
-
-            type_name = self._discover_type_name(feedback)
-            if type_name == first_type:
-                raise first_error
-            texts = self._download_geojson_batches(type_name, labels, extent, feedback)
-            return type_name, texts
-
     @staticmethod
-    def _detect_label_field(fields):
-        names = [field.name() for field in fields]
-        for name in names:
-            if name.lower() == "label":
-                return name
-        for name in names:
-            if "label" in name.lower():
-                return name
-        return None
+    def _first_wkb_type(features):
+        for feature in features:
+            geometry = feature.geometry()
+            if geometry is not None and not geometry.isEmpty():
+                return geometry.wkbType()
+        return Qgis.WkbType.LineString
 
-    @staticmethod
-    def _parse_geojson_batches(texts):
-        if not texts:
-            return QgsFields(), []
-
-        source_fields = QgsFields()
-        for text in texts:
-            candidate = QgsJsonUtils.stringToFields(text)
-            if len(candidate):
-                source_fields = candidate
+    def _process_batch(
+        self,
+        features,
+        csv_groups,
+        csv_rows,
+        output_fields,
+        csv_output_names,
+        aux_names,
+        sink,
+        matched_csv,
+        found_labels,
+        feedback,
+    ):
+        records = []
+        line_groups = defaultdict(list)
+        for feature in features:
+            if feedback.isCanceled():
                 break
+            label = normalize_label(feature[self.LABEL_FIELD])
+            geometry = feature.geometry()
+            length_m = None if geometry is None or geometry.isEmpty() else round(
+                geometry.length(), 2
+            )
+            index = len(records)
+            records.append((geometry, label, length_m))
+            if label:
+                found_labels.add(label)
+            if label and length_m is not None:
+                line_groups[label].append((index, length_m))
 
-        features = []
-        for text in texts:
-            features.extend(QgsJsonUtils.stringToFeatureList(text, source_fields))
-        return source_fields, features
+        matches = {}
+        for label in line_groups.keys() & csv_groups.keys():
+            for line_idx, csv_idx in optimal_one_to_one(
+                line_groups[label], csv_groups[label]
+            ):
+                matches[line_idx] = csv_idx
+                matched_csv.add(csv_idx)
+
+        output_index = {field.name(): i for i, field in enumerate(output_fields)}
+        csv_output_items = tuple(csv_output_names.items())
+        for idx, (geometry, label, line_len) in enumerate(records):
+            out = QgsFeature(output_fields)
+            out.setGeometry(geometry)
+            attrs = [None] * len(output_fields)
+            csv_idx = matches.get(idx)
+            attrs[output_index[aux_names["wfs_label_norm"]]] = label
+            attrs[output_index[aux_names["wfs_len_m"]]] = line_len
+
+            if not label:
+                status = "LEGE_WFS_LABEL"
+            elif line_len is None:
+                status = "ONGELDIGE_WFS_GEOMETRIE"
+            elif csv_idx is None and label not in csv_groups:
+                status = "GEEN_EXACT_LABEL_IN_CSV"
+            elif csv_idx is None:
+                status = "GEEN_CSV_RIJ_OVER_IN_LABELGROEP"
+            else:
+                status = "GEKOPPELD"
+                row = csv_rows[csv_idx]
+                for csv_name, output_name in csv_output_items:
+                    attrs[output_index[output_name]] = row["values"].get(csv_name, "")
+                attrs[output_index[aux_names["csv_len_m"]]] = row["length_m"]
+                attrs[output_index[aux_names["len_diff_m"]]] = round(
+                    abs(line_len - row["length_m"]), 2
+                )
+                attrs[output_index[aux_names["csv_row_nr"]]] = row["row_number"]
+
+            attrs[output_index[aux_names["match_status"]]] = status
+            out.setAttributes(attrs)
+            sink.addFeature(out, QgsFeatureSink.Flag.FastInsert)
+
+        return len(records), len(matches)
 
     def processAlgorithm(self, parameters, context, feedback):
         csv_path = self.parameterAsFile(parameters, self.CSV_FILE, context)
@@ -343,68 +396,24 @@ class KoppelWfsCsvAutoAlgorithm(KoppelWfsCsvAlgorithm):
 
         source_crs = QgsCoordinateReferenceSystem.fromEpsgId(self.RD_EPSG)
         extent = None
-        extent_value = parameters.get(self.EXTENT)
-        if extent_value not in (None, ""):
+        if parameters.get(self.EXTENT) not in (None, ""):
             extent = self.parameterAsExtent(
-                parameters,
-                self.EXTENT,
-                context,
-                source_crs,
+                parameters, self.EXTENT, context, source_crs
             )
             if extent is None or extent.isNull() or extent.isEmpty():
                 extent = None
             else:
-                feedback.pushInfo("Scherm/gebied-extent wordt direct als WFS BBOX verstuurd.")
+                feedback.pushInfo("Schermextent wordt direct als WFS BBOX verstuurd.")
 
-        type_name = self._stored_type_name() or self.TYPE_NAME_CONTAINS
-        source_fields = QgsFields()
-        source_features = []
-
-        if csv_groups:
-            feedback.setProgressText("Direct gefilterde Enexis WFS-data ophalen...")
-            try:
-                type_name, geojson_texts = self._fetch_with_type_fallback(
-                    csv_groups.keys(), extent, feedback
-                )
-            except DirectWfsError as exc:
-                raise QgsProcessingException(str(exc)) from exc
-            source_fields, source_features = self._parse_geojson_batches(geojson_texts)
-        else:
-            feedback.pushInfo(
-                "CSV bevat geen geldige Kabel Subgroep + lengte-combinaties; "
-                "er wordt geen WFS-oproep gedaan."
-            )
-
-        label_field = self._detect_label_field(source_fields)
-        if source_features and not label_field:
+        if extent is None and len(csv_groups) > self.MAX_LABELS_WITHOUT_EXTENT:
             raise QgsProcessingException(
-                "WFS GeoJSON bevat features maar geen veld met 'label' in de naam."
+                "Veiligheidsstop: {0} geldige kabelgroepen zonder extent. Kies de "
+                "huidige kaartcanvas-extent of een kleiner gebied.".format(len(csv_groups))
             )
-
-        source_wkb_type = Qgis.WkbType.LineString
-        for feature in source_features:
-            geometry = feature.geometry()
-            if geometry is not None and not geometry.isEmpty():
-                source_wkb_type = geometry.wkbType()
-                break
 
         output_fields, csv_output_names, aux_names = self._output_fields(
-            source_fields,
-            csv_fieldnames,
+            QgsFields(), csv_fieldnames
         )
-        sink, dest_id = self.parameterAsSink(
-            parameters,
-            self.OUTPUT,
-            context,
-            output_fields,
-            source_wkb_type,
-            source_crs,
-        )
-        if sink is None:
-            raise QgsProcessingException(
-                self.invalidSinkError(parameters, self.OUTPUT)
-            )
-
         unmatched_fields = self._unmatched_csv_fields(csv_fieldnames)
         unmatched_sink, unmatched_id = self.parameterAsSink(
             parameters,
@@ -419,87 +428,92 @@ class KoppelWfsCsvAutoAlgorithm(KoppelWfsCsvAlgorithm):
                 self.invalidSinkError(parameters, self.UNMATCHED_CSV)
             )
 
-        line_records = []
-        line_groups = defaultdict(list)
-        for feature in source_features:
-            if feedback.isCanceled():
-                break
-            label = normalize_label(feature[label_field]) if label_field else ""
-            geometry = feature.geometry()
-            if geometry is None or geometry.isEmpty():
-                length_m = None
-            else:
-                length_m = round(geometry.length(), 2)
-
-            line_idx = len(line_records)
-            line_records.append((feature, label, length_m))
-            if label and length_m is not None:
-                line_groups[label].append((line_idx, length_m))
-
-        feedback.setProgress(60.0)
-        matches = {}
+        sink = None
+        dest_id = None
+        type_name = self._stored_type_name() or self.TYPE_NAME_CONTAINS
         matched_csv = set()
-        for label in line_groups.keys() & csv_groups.keys():
+        found_labels = set()
+        total_wfs = 0
+        total_matches = 0
+
+        batches = self._chunks(sorted(csv_groups.keys()), self.LABELS_PER_REQUEST)
+        feedback.pushInfo(
+            "Low-resource modus: {0} kabelgroep(en), {1} WFS-batch(es), "
+            "maximaal één request tegelijk.".format(len(csv_groups), len(batches))
+        )
+
+        for batch_index, labels in enumerate(batches):
             if feedback.isCanceled():
                 break
-            for line_idx, csv_idx in optimal_one_to_one(
-                line_groups[label], csv_groups[label]
-            ):
-                matches[line_idx] = csv_idx
-                matched_csv.add(csv_idx)
-
-        feedback.setProgress(72.0)
-        output_index = {field.name(): i for i, field in enumerate(output_fields)}
-        source_field_count = len(source_fields)
-        csv_output_items = tuple(csv_output_names.items())
-
-        for idx, (source_feature, label, line_len) in enumerate(line_records):
-            if feedback.isCanceled():
-                break
-
-            out = QgsFeature(output_fields)
-            out.setGeometry(source_feature.geometry())
-            attrs = list(source_feature.attributes()) + [None] * (
-                len(output_fields) - source_field_count
+            feedback.setProgressText(
+                "WFS-batch {0}/{1} ophalen...".format(batch_index + 1, len(batches))
             )
-            csv_idx = matches.get(idx)
+            try:
+                if batch_index == 0:
+                    type_name, features = self._download_first_batch(
+                        labels, extent, feedback
+                    )
+                else:
+                    features = self._download_batch(type_name, labels, extent)
+            except DirectWfsError as exc:
+                raise QgsProcessingException(str(exc)) from exc
 
-            attrs[output_index[aux_names["wfs_label_norm"]]] = label
-            attrs[output_index[aux_names["wfs_len_m"]]] = line_len
-
-            if not label:
-                status = "LEGE_WFS_LABEL"
-            elif line_len is None:
-                status = "ONGELDIGE_WFS_GEOMETRIE"
-            elif csv_idx is None and label not in csv_groups:
-                status = "GEEN_EXACT_LABEL_IN_CSV"
-            elif csv_idx is None:
-                status = "GEEN_CSV_RIJ_OVER_IN_LABELGROEP"
-            else:
-                status = "GEKOPPELD"
-                row = csv_rows[csv_idx]
-                row_values = row["values"]
-                for csv_name, output_name in csv_output_items:
-                    attrs[output_index[output_name]] = row_values.get(csv_name, "")
-                attrs[output_index[aux_names["csv_len_m"]]] = row["length_m"]
-                attrs[output_index[aux_names["len_diff_m"]]] = round(
-                    abs(line_len - row["length_m"]), 2
+            if sink is None and features:
+                sink, dest_id = self.parameterAsSink(
+                    parameters,
+                    self.OUTPUT,
+                    context,
+                    output_fields,
+                    self._first_wkb_type(features),
+                    source_crs,
                 )
-                attrs[output_index[aux_names["csv_row_nr"]]] = row["row_number"]
+                if sink is None:
+                    raise QgsProcessingException(
+                        self.invalidSinkError(parameters, self.OUTPUT)
+                    )
 
-            attrs[output_index[aux_names["match_status"]]] = status
-            out.setAttributes(attrs)
-            sink.addFeature(out, QgsFeatureSink.Flag.FastInsert)
+            if sink is not None and features:
+                processed, matched = self._process_batch(
+                    features,
+                    csv_groups,
+                    csv_rows,
+                    output_fields,
+                    csv_output_names,
+                    aux_names,
+                    sink,
+                    matched_csv,
+                    found_labels,
+                    feedback,
+                )
+                total_wfs += processed
+                total_matches += matched
 
-        feedback.setProgress(90.0)
+            del features
+            gc.collect()
+            feedback.setProgress(80.0 * (batch_index + 1) / max(1, len(batches)))
+
+        if sink is None:
+            sink, dest_id = self.parameterAsSink(
+                parameters,
+                self.OUTPUT,
+                context,
+                output_fields,
+                Qgis.WkbType.LineString,
+                source_crs,
+            )
+            if sink is None:
+                raise QgsProcessingException(
+                    self.invalidSinkError(parameters, self.OUTPUT)
+                )
+
         unmatched_indices = [
-            idx for idx in range(len(csv_rows)) if idx not in matched_csv
+            index for index in range(len(csv_rows)) if index not in matched_csv
         ]
         for csv_idx in unmatched_indices:
             row = csv_rows[csv_idx]
             if csv_idx in csv_pre_unmatched:
                 reason = csv_pre_unmatched[csv_idx]
-            elif row["label"] not in line_groups:
+            elif row["label"] not in found_labels:
                 reason = (
                     "GEEN_MATCH_BINNEN_EXTENT"
                     if extent is not None
@@ -510,23 +524,15 @@ class KoppelWfsCsvAutoAlgorithm(KoppelWfsCsvAlgorithm):
 
             feature = QgsFeature(unmatched_fields)
             values = [row["values"].get(name, "") for name in csv_fieldnames]
-            values.extend(
-                [row["row_number"], row["label"], row["length_m"], reason]
-            )
+            values.extend([row["row_number"], row["label"], row["length_m"], reason])
             feature.setAttributes(values)
             unmatched_sink.addFeature(feature, QgsFeatureSink.Flag.FastInsert)
 
         feedback.setProgress(100.0)
         feedback.pushInfo(
-            "Klaar via directe GeoJSON WFS-oproep ({0}): {1} koppeling(en), "
-            "{2} WFS-lijn(en) zonder CSV-match en {3} CSV-rij(en) zonder WFS-match.".format(
-                type_name,
-                len(matches),
-                len(line_records) - len(matches),
-                len(unmatched_indices),
+            "Klaar in low-resource modus ({0}): {1} WFS-lijn(en), {2} koppeling(en), "
+            "{3} CSV-rij(en) zonder match.".format(
+                type_name, total_wfs, total_matches, len(unmatched_indices)
             )
         )
-        return {
-            self.OUTPUT: dest_id,
-            self.UNMATCHED_CSV: unmatched_id,
-        }
+        return {self.OUTPUT: dest_id, self.UNMATCHED_CSV: unmatched_id}
