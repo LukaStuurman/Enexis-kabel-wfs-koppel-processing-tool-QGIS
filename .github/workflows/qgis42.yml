@@ -62,7 +62,10 @@ jobs:
           assert "Zuid" in algorithm.SOURCE_OPTIONS[2]
           assert "Noord + Zuid" in algorithm.SOURCE_OPTIONS[3]
           assert TARGET_FOLDER == "imkl_elektriciteitskabel_e_lv_map_cable_ligging"
-          assert SHAPE_DOWNLOAD_URL.startswith("https://c.spotler.com/ct/")
+          assert SHAPE_DOWNLOAD_URL == (
+              "https://enxp433-opendata-publications.s3.eu-west-1.amazonaws.com/"
+              "Open_Asset_Data_Elektra.zip"
+          )
 
           assert algorithm.MAX_EXTENT_LABEL_FEATURES == 10000
           assert NationwideProcessor.TILE_SIZE_M == 25000.0
@@ -117,7 +120,47 @@ jobs:
           assert provider.algorithms()[0].__class__.__module__ == "enexiskabel.algorithm_source"
 
           app.exitQgis()
-          print("QGIS 4.2 v0.15 smoke test OK")
+          print("QGIS 4.2 v0.15.2 smoke test OK")
+          PY
+
+      - name: Probe live Enexis SHAPE archive
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import time
+          import urllib.request
+
+          from shape_archive import SHAPE_DOWNLOAD_URL
+
+          last_error = None
+          for attempt in range(3):
+              try:
+                  request = urllib.request.Request(
+                      SHAPE_DOWNLOAD_URL,
+                      headers={
+                          "User-Agent": "Enexis-QGIS-v0152-CI-probe",
+                          "Range": "bytes=0-63",
+                          "Accept": "application/zip, application/octet-stream, */*",
+                      },
+                  )
+                  with urllib.request.urlopen(request, timeout=30) as response:
+                      data = response.read(64)
+                      content_type = response.headers.get("Content-Type", "")
+                      content_range = response.headers.get("Content-Range", "")
+                  if not data.startswith(b"PK\x03\x04"):
+                      raise RuntimeError(
+                          "Enexis SHAPE URL returned non-ZIP magic: " + data[:16].hex()
+                      )
+                  print("ENEXIS_SHAPE_URL=" + SHAPE_DOWNLOAD_URL)
+                  print("ENEXIS_SHAPE_CONTENT_TYPE=" + content_type)
+                  print("ENEXIS_SHAPE_CONTENT_RANGE=" + content_range)
+                  print("ENEXIS_SHAPE_ZIP_MAGIC=true")
+                  break
+              except Exception as exc:
+                  last_error = exc
+                  if attempt == 2:
+                      raise
+                  time.sleep(2 ** attempt)
           PY
 
       - name: Probe live Enexis WFS GeoPackage output
@@ -161,7 +204,7 @@ jobs:
           }
           request = urllib.request.Request(
               base + "?" + urllib.parse.urlencode(params),
-              headers={"User-Agent": "Enexis-QGIS-v015-CI-probe"},
+              headers={"User-Agent": "Enexis-QGIS-v0152-CI-probe"},
           )
           try:
               with urllib.request.urlopen(request, timeout=30) as response:
