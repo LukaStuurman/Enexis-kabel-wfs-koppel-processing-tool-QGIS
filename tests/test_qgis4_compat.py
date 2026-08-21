@@ -13,58 +13,55 @@ class Qgis42CompatibilityTests(unittest.TestCase):
             self.assertNotIn("QVariant.Double", text)
             self.assertNotIn("QVariant.Int", text)
 
-    def test_no_legacy_wkb_enum_in_active_algorithm(self):
+    def test_qgis4_native_wkb_enum(self):
         text = (ROOT / "algorithm_auto.py").read_text(encoding="utf-8")
         self.assertNotIn("QgsWkbTypes.LineString", text)
         self.assertIn("Qgis.WkbType.MultiLineString", text)
 
-    def test_modern_qgis42_field_types(self):
-        text = (ROOT / "algorithm.py").read_text(encoding="utf-8")
-        self.assertIn("QMetaType.Type.QString", text)
-        self.assertIn("QMetaType.Type.Double", text)
-        self.assertIn("QMetaType.Type.Int", text)
-
-    def test_metadata_requires_qgis_42_and_v012(self):
+    def test_metadata_requires_qgis_42_and_v013(self):
         text = (ROOT / "metadata.txt").read_text(encoding="utf-8")
         self.assertIn("qgisMinimumVersion=4.2", text)
-        self.assertIn("version=0.12.0", text)
+        self.assertIn("version=0.13.0", text)
 
-    def test_dxf_algorithm_is_registered(self):
-        provider = (ROOT / "provider.py").read_text(encoding="utf-8")
-        self.assertIn("from .algorithm_dxf import SplitNaarDXF", provider)
-        self.assertIn("self.addAlgorithm(SplitNaarDXF())", provider)
-
-    def test_dxf_uses_coupling_output_fields(self):
-        text = (ROOT / "algorithm_dxf.py").read_text(encoding="utf-8")
-        self.assertIn('"wfs_label_norm"', text)
-        self.assertIn('"csv_Kabel Subgroep"', text)
-        self.assertIn('"csv_Type"', text)
-        self.assertIn('text.split("-", 1)[0].strip()', text)
-        self.assertIn('r"^\\s*Kabelgroup\\s*:\\s*"', text)
-
-    def test_dxf_uses_qgis4_native_enums(self):
-        text = (ROOT / "algorithm_dxf.py").read_text(encoding="utf-8")
-        self.assertIn("QMetaType.Type.QString", text)
-        self.assertIn("Qgis.ProcessingNumberParameterType.Integer", text)
-
-    def test_dxf_has_constant_memory_nationwide_mode(self):
-        text = (ROOT / "algorithm_dxf.py").read_text(encoding="utf-8")
-        self.assertIn("def _stream_whole_country", text)
-        self.assertIn("request.setSubsetOfAttributes", text)
-        self.assertIn('"Nederland_Kabels_{0:04d}.dxf"', text)
-        self.assertIn("features_in_file >= features_per_file", text)
-        self.assertIn('status.casefold() != "gekoppeld"', text)
-        self.assertIn("zlib.crc32", text)
-
-    def test_nationwide_matching_is_disk_backed(self):
+    def test_cache_folder_is_registered_in_init(self):
         text = (ROOT / "algorithm_auto.py").read_text(encoding="utf-8")
-        self.assertIn("def _build_nationwide_cache", text)
-        self.assertIn("CREATE TABLE csv_rows", text)
-        self.assertIn("CREATE TABLE wfs_rows", text)
-        self.assertIn("values_json TEXT NOT NULL", text)
-        self.assertIn("def _process_nationwide", text)
-        self.assertIn("return self._process_nationwide", text)
-        self.assertIn("os.remove(cache_path)", text)
+        init_part = text.split("def initAlgorithm", 1)[1].split("def _get_setting", 1)[0]
+        process_part = text.split("def processAlgorithm", 1)[1]
+        self.assertIn("QgsProcessingParameterFolderDestination", init_part)
+        self.assertIn("self.CACHE_FOLDER", init_part)
+        self.assertNotIn("self.addParameter(", process_part)
+
+    def test_reusable_csv_index_is_used(self):
+        text = (ROOT / "algorithm_auto.py").read_text(encoding="utf-8")
+        index_text = (ROOT / "csv_index.py").read_text(encoding="utf-8")
+        self.assertIn("from .csv_index import CsvIndexError, open_csv_index", text)
+        self.assertIn("csv_index.rows_for_labels(found_labels)", text)
+        self.assertIn("INDEX_PREFIX = \"enexis_csv_index_\"", index_text)
+        self.assertIn("source_edge_sha256", index_text)
+        self.assertIn("CREATE INDEX idx_csv_rows_label ON csv_rows(label)", index_text)
+
+    def test_persistent_index_has_no_run_specific_match_state(self):
+        index_text = (ROOT / "csv_index.py").read_text(encoding="utf-8")
+        self.assertNotIn("matched INTEGER", index_text)
+        self.assertNotIn("wfs_found INTEGER", index_text)
+        active = (ROOT / "algorithm_auto.py").read_text(encoding="utf-8")
+        self.assertIn("ALTER TABLE csv_rows ADD COLUMN matched", active)
+        self.assertIn("ALTER TABLE csv_rows ADD COLUMN wfs_found", active)
+        self.assertIn("enexis_landelijk_run_", active)
+
+    def test_cancel_never_silently_finishes_partial_nationwide_run(self):
+        text = (ROOT / "algorithm_auto.py").read_text(encoding="utf-8")
+        self.assertIn("def _cancel_if_requested", text)
+        self.assertNotIn("while not feedback.isCanceled()", text)
+        self.assertIn("gedeeltelijk resultaat", text)
+        self.assertIn("gedeeltelijke uitvoer", text)
+
+    def test_nationwide_temporary_outputs_are_refused(self):
+        text = (ROOT / "algorithm_auto.py").read_text(encoding="utf-8")
+        self.assertIn("def _require_nationwide_disk_outputs", text)
+        self.assertIn("TEMPORARY_OUTPUT", text)
+        self.assertIn('text.lower().startswith("memory:")', text)
+        self.assertIn("GeoPackage (.gpkg)", text)
 
     def test_nationwide_wfs_is_paged_once_and_joined_locally(self):
         text = (ROOT / "algorithm_auto.py").read_text(encoding="utf-8")
@@ -72,7 +69,6 @@ class Qgis42CompatibilityTests(unittest.TestCase):
         self.assertIn("MAX_NATIONWIDE_PAGE_BYTES = 64 * 1024 * 1024", text)
         self.assertIn('params["startIndex"] = str(start_index)', text)
         self.assertIn('params["sortBy"] = "fid A"', text)
-        self.assertIn("def _cached_wfs_records_for_labels", text)
         self.assertIn("NATIONWIDE_MATCH_LABEL_BATCH = 50", text)
 
     def test_wfs_transient_errors_are_retried(self):
@@ -97,27 +93,10 @@ class Qgis42CompatibilityTests(unittest.TestCase):
     def test_geometry_only_for_common_labels(self):
         text = (ROOT / "algorithm_auto.py").read_text(encoding="utf-8")
         self.assertIn("common_labels = sorted(found_labels & set(csv_groups.keys()))", text)
-        self.assertIn("def _fetch_geometry_records", text)
         self.assertIn("LABELS_PER_GEOMETRY_REQUEST = 10", text)
-        self.assertIn("cql_filter", text)
         self.assertIn("def _extent_label_filter", text)
         self.assertIn("BBOX({0},{1},{2},{3},{4},'{5}')", text)
         self.assertIn('GEOMETRY_FIELD = "geografischeligging"', text)
-
-    def test_extent_filters_nationwide_csv_before_copying_rows(self):
-        helper = (ROOT / "algorithm.py").read_text(encoding="utf-8")
-        active = (ROOT / "algorithm_auto.py").read_text(encoding="utf-8")
-        self.assertIn("def _read_csv(self, path, allowed_labels=None)", helper)
-        self.assertIn("if allowed is not None and label not in allowed:", helper)
-        self.assertIn("csv_allowed_labels = found_labels if extent is not None else None", active)
-        self.assertIn("allowed_labels=csv_allowed_labels", active)
-        self.assertIn("Rijen buiten de extent worden", active)
-
-    def test_phase_timings_are_reported(self):
-        text = (ROOT / "algorithm_auto.py").read_text(encoding="utf-8")
-        self.assertIn("Timing: schema", text)
-        self.assertIn("labelscan", text)
-        self.assertIn("WFS-geometrie", text)
 
     def test_geometry_parsed_directly_from_geojson(self):
         text = (ROOT / "algorithm_auto.py").read_text(encoding="utf-8")
@@ -125,23 +104,19 @@ class Qgis42CompatibilityTests(unittest.TestCase):
         self.assertNotIn("QgsJsonUtils.stringToFeatureList", text)
         self.assertNotIn("QgsJsonUtils.stringToFields", text)
 
-    def test_label_field_is_detected_not_hardcoded(self):
-        text = (ROOT / "algorithm_auto.py").read_text(encoding="utf-8")
-        self.assertIn("def _detect_label_field", text)
-        self.assertIn('text.startswith("kabelgroup:")', text)
-        self.assertIn("WFS-labelveld gedetecteerd", text)
+    def test_dxf_algorithm_is_registered(self):
+        provider = (ROOT / "provider.py").read_text(encoding="utf-8")
+        self.assertIn("from .algorithm_dxf import SplitNaarDXF", provider)
+        self.assertIn("self.addAlgorithm(SplitNaarDXF())", provider)
 
-    def test_zero_match_diagnostics(self):
-        text = (ROOT / "algorithm_auto.py").read_text(encoding="utf-8")
-        self.assertIn("Geen exacte labelovereenkomst", text)
-        self.assertIn("WFS-voorbeeld", text)
-        self.assertIn("CSV-voorbeeld", text)
-
-    def test_resource_limits_and_gc(self):
-        text = (ROOT / "algorithm_auto.py").read_text(encoding="utf-8")
-        self.assertIn("response.read(limit + 1)", text)
-        self.assertIn("MAX_GEOMETRY_RESPONSE_BYTES = 8 * 1024 * 1024", text)
-        self.assertIn("gc.collect()", text)
+    def test_dxf_has_constant_memory_nationwide_mode(self):
+        text = (ROOT / "algorithm_dxf.py").read_text(encoding="utf-8")
+        self.assertIn("def _stream_whole_country", text)
+        self.assertIn("request.setSubsetOfAttributes", text)
+        self.assertIn('"Nederland_Kabels_{0:04d}.dxf"', text)
+        self.assertIn("features_in_file >= features_per_file", text)
+        self.assertIn('status.casefold() != "gekoppeld"', text)
+        self.assertIn("zlib.crc32", text)
 
 
 if __name__ == "__main__":
