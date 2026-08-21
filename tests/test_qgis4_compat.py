@@ -24,10 +24,10 @@ class Qgis42CompatibilityTests(unittest.TestCase):
         self.assertIn("QMetaType.Type.Double", text)
         self.assertIn("QMetaType.Type.Int", text)
 
-    def test_metadata_requires_qgis_42(self):
+    def test_metadata_requires_qgis_42_and_v08(self):
         text = (ROOT / "metadata.txt").read_text(encoding="utf-8")
         self.assertIn("qgisMinimumVersion=4.2", text)
-        self.assertIn("version=0.7.0", text)
+        self.assertIn("version=0.8.0", text)
 
     def test_wfs_downloads_are_not_parallel(self):
         text = (ROOT / "algorithm_auto.py").read_text(encoding="utf-8")
@@ -35,26 +35,43 @@ class Qgis42CompatibilityTests(unittest.TestCase):
         self.assertNotIn("as_completed", text)
         self.assertNotIn("MAX_HTTP_WORKERS", text)
 
-    def test_resource_safety_limits_exist(self):
+    def test_extent_scan_is_label_only(self):
         text = (ROOT / "algorithm_auto.py").read_text(encoding="utf-8")
-        self.assertIn("LABELS_PER_REQUEST = 5", text)
-        self.assertIn("MAX_FEATURES_PER_BATCH = 500", text)
-        self.assertIn("MAX_FEATURES_IN_EXTENT = 500", text)
-        self.assertIn("MAX_RESPONSE_BYTES = 8 * 1024 * 1024", text)
-        self.assertIn("response.read(limit + 1)", text)
-        self.assertIn("gc.collect()", text)
+        self.assertIn("def _fetch_extent_labels", text)
+        self.assertIn('params["propertyName"] = label_field', text)
+        self.assertIn("MAX_EXTENT_LABEL_FEATURES = 10000", text)
+        self.assertIn("MAX_LABEL_SCAN_BYTES = 4 * 1024 * 1024", text)
 
-    def test_only_minimal_wfs_attributes_are_parsed(self):
+    def test_geometry_only_for_common_labels(self):
         text = (ROOT / "algorithm_auto.py").read_text(encoding="utf-8")
-        self.assertIn("QgsField(self.LABEL_FIELD, QMetaType.Type.QString)", text)
+        self.assertIn("common_labels = sorted(extent_labels & set(csv_groups.keys()))", text)
+        self.assertIn("def _fetch_geometry_records", text)
+        self.assertIn("LABELS_PER_GEOMETRY_REQUEST = 10", text)
+        self.assertIn("cql_filter", text)
+
+    def test_geometry_parsed_directly_from_geojson(self):
+        text = (ROOT / "algorithm_auto.py").read_text(encoding="utf-8")
+        self.assertIn("QgsJsonUtils.geometryFromGeoJson", text)
+        self.assertNotIn("QgsJsonUtils.stringToFeatureList", text)
         self.assertNotIn("QgsJsonUtils.stringToFields", text)
 
-    def test_extent_mode_is_extent_first(self):
+    def test_label_field_is_detected_not_hardcoded(self):
         text = (ROOT / "algorithm_auto.py").read_text(encoding="utf-8")
-        self.assertIn("def _extent_getfeature_url", text)
-        self.assertIn('params["bbox"]', text)
-        self.assertIn("Extent mode intentionally has NO CSV/label filter", text)
-        self.assertIn("daarna lokaal vergelijken met de CSV", text)
+        self.assertIn("def _detect_label_field", text)
+        self.assertIn('text.startswith("kabelgroup:")', text)
+        self.assertIn("WFS-labelveld gedetecteerd", text)
+
+    def test_zero_match_diagnostics(self):
+        text = (ROOT / "algorithm_auto.py").read_text(encoding="utf-8")
+        self.assertIn("Geen exacte labelovereenkomst", text)
+        self.assertIn("WFS-voorbeeld", text)
+        self.assertIn("CSV-voorbeeld", text)
+
+    def test_resource_limits_and_gc(self):
+        text = (ROOT / "algorithm_auto.py").read_text(encoding="utf-8")
+        self.assertIn("response.read(limit + 1)", text)
+        self.assertIn("MAX_GEOMETRY_RESPONSE_BYTES = 8 * 1024 * 1024", text)
+        self.assertIn("gc.collect()", text)
 
 
 if __name__ == "__main__":
