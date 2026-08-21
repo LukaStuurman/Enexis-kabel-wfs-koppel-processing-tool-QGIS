@@ -130,3 +130,146 @@ def download_archive(destination, feedback=None):
             os.remove(temp_path)
         except OSError:
             pass
+
+
+def _target_relative_parts(member_name):
+    normalized = str(member_name or "").replace("\\", "/")
+    parts = [part for part in normalized.split("/") if part not in ("", ".")]
+    wanted = TARGET_FOLDER.casefold()
+    target_index = None
+    for index, part in enumerate(parts):
+        if part.casefold() == wanted:
+            target_index = index
+            break
+    if target_index is None:
+        return None
+    relative = parts[target_index + 1 :]
+    if not relative or any(part == ".." for part in relative):
+        return None
+    return relative
+
+
+def _sidecars_for(path):
+    folder = os.path.dirname(path)
+    stem = os.path.splitext(os.path.basename(path))[0].casefold()
+    suffixes = set()
+    for name in os.listdir(folder):
+        candidate_stem, candidate_ext = os.path.splitext(name)
+        if candidate_stem.casefold() == stem:
+            suffixes.add(candidate_ext.casefold())
+    return suffixes
+
+
+def discover_shape_files(extracted_folder):
+    """Find exactly one Noord and one Zuid SHP and validate their sidecars."""
+    shape_files = []
+    for root, _, files in os.walk(extracted_folder):
+        for name in files:
+            if os.path.splitext(name)[1].casefold() == ".shp":
+                shape_files.append(os.path.join(root, name))
+
+    north = [
+        path for path in shape_files
+        if "noord" in os.path.basename(path).casefold()
+        or "north" in os.path.basename(path).casefold()
+    ]
+    south = [
+        path for path in shape_files
+        if "zuid" in os.path.basename(path).casefold()
+        or "south" in os.path.basename(path).casefold()
+    ]
+    if len(north) != 1 or len(south) != 1:
+        names = ", ".join(sorted(os.path.basename(path) for path in shape_files)) or "(geen)"
+        raise ShapeArchiveError(
+            "In '{0}' moeten exact twee SHAPE-lagen staan: één met Noord en één met Zuid in de naam. "
+            "Gevonden SHP-bestanden: {1}".format(TARGET_FOLDER, names)
+        )
+    if os.path.normcase(north[0]) == os.path.normcase(south[0]):
+        raise ShapeArchiveError("Noord en Zuid verwijzen naar hetzelfde SHAPE-bestand.")
+
+    for path in (north[0], south[0]):
+        suffixes = _sidecars_for(path)
+        missing = [ext for ext in (".dbf", ".shx", ".prj") if ext not in suffixes]
+        if missing:
+            raise ShapeArchiveError(
+                "SHAPE-bestand '{0}' mist verplichte sidecar(s): {1}.".format(
+                    os.path.basename(path), ", ".join(missing)
+                )
+            )
+    return {"noord": north[0], "zuid": south[0]}
+
+
+def extract_target_folder(archive_path, destination):
+    """Extract only the requested IMKL folder into an atomic cache directory."""
+    parent = os.path.dirname(destination)
+    build_root = tempfile.mkdtemp(prefix="enexis_shape_extract_", dir=parent)
+    build_target = os.path.join(build_root, TARGET_FOLDER)
+    os.makedirs(build_target, exist_ok=True)
+    extracted_count = 0
+    try:
+        with zipfile.ZipFile(archive_path, "r") as archive:
+            for info in archive.infolist():
+                if info.is_dir():
+                    continue
+                relative = _target_relative_parts(info.filename)
+                if relative is None:
+                    continue
+                target = os.path.abspath(os.path.join(build_target, *relative))
+                root = os.path.abspath(build_target)
+                if os.path.commonpath((target, root)) != root:
+                    raise ShapeArchiveError("Onveilige padnaam in de Enexis ZIP geweigerd.")
+                os.makedirs(os.path.dirname(target), exist_ok=True)
+                with archive.open(info, "r") as source, open(target, "wb") as output:
+                    shutil.copyfileobj(source, output, DOWNLOAD_CHUNK_BYTES)
+                extracted_count += 1
+
+        if extracted_count == 0:
+            raise ShapeArchiveError(
+                "Map '{0}' is niet gevonden in de Enexis ZIP.".format(TARGET_FOLDER)
+            )
+        shape_files = discover_shape_files(build_target)
+        old_path = destination + ".old"
+        shutil.rmtree(old_path, ignore_errors=True)
+        if os.path.exists(destination):
+            os.replace(destination, old_path)
+        os.replace(build_target, destination)
+        shutil.rmtree(old_path, ignore_errors=True)
+        return shape_files
+    finally:
+        shutil.rmtree(build_root, ignore_errors=True)
+
+
+def ensure_shape_archive(cache_folder, refresh=False, feedback=None):
+    """Download when needed, extract the target folder and return both SHP paths."""
+    archive_path, extracted_folder = archive_paths(cache_folder)
+    downloaded = False
+    if refresh or not os.path.exists(archive_path):
+        if feedback is not None:
+            feedback.setProgressText("Enexis SHAPE ZIP automatisch downloaden...")
+        download_archive(archive_path, feedback=feedback)
+        downloaded = True
+
+    if not zipfile.is_zipfile(archive_path):
+        raise ShapeArchiveError(
+            "De lokale Enexis SHAPE-cache bevat geen geldige ZIP. Vernieuw de SHAPE-download."
+        )
+
+    if downloaded or not os.path.isdir(extracted_folder):
+        if feedback is not None:
+            feedback.setProgressText(
+                "Enexis ZIP uitpakken: alleen map '{0}'...".format(TARGET_FOLDER)
+            )
+        shape_files = extract_target_folder(archive_path, extracted_folder)
+    else:
+        try:
+            shape_files = discover_shape_files(extracted_folder)
+        except ShapeArchiveError:
+            shape_files = extract_target_folder(archive_path, extracted_folder)
+
+    return {
+        "archive_path": archive_path,
+        "extracted_folder": extracted_folder,
+        "shape_files": shape_files,
+        "fingerprint": archive_fingerprint(archive_path),
+        "downloaded": downloaded,
+    }
