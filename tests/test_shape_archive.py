@@ -55,6 +55,21 @@ class ShapeArchiveTests(unittest.TestCase):
         self.assertIn(shape_archive.DOWNLOAD_ID, shape_archive.ARCHIVE_NAME)
         self.assertIn(shape_archive.DOWNLOAD_ID, shape_archive.EXTRACTED_NAME)
 
+    def test_detects_qgis_generated_processing_cache_folder(self):
+        generated = (
+            r"C:\Users\TestUser\AppData\Local\Temp\processing_abcd1234"
+            r"\0123456789abcdef0123456789abcdef\CACHE_FOLDER"
+        )
+        self.assertTrue(shape_archive._is_qgis_processing_temp_cache(generated))
+        self.assertFalse(
+            shape_archive._is_qgis_processing_temp_cache(r"C:\EnexisCache")
+        )
+        self.assertFalse(
+            shape_archive._is_qgis_processing_temp_cache(
+                r"C:\Project\processing_notes\CACHE_FOLDER_CUSTOM"
+            )
+        )
+
     def test_windows_qgis_temp_paths_stay_below_safe_limit(self):
         # Synthetic path with the same shape as a deep QGIS Processing temp path.
         cache_root = (
