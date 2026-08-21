@@ -41,6 +41,7 @@ jobs:
           algorithm = KoppelWfsCsvAutoAlgorithm()
           algorithm.initAlgorithm()
           assert algorithm.name() == "koppel_enexis_wfs_kabels_automatisch_aan_csv"
+          assert algorithm.TYPE_HINT == "asm_e_lv_map_cable"
           definitions = algorithm.parameterDefinitions()
           assert len(definitions) == 7, [p.name() for p in definitions]
           assert {p.name() for p in definitions} == {
@@ -55,6 +56,21 @@ jobs:
           assert algorithm.MAX_EXTENT_LABEL_FEATURES == 10000
           assert NationwideProcessor.TILE_SIZE_M == 25000.0
           assert NationwideProcessor.MAX_TILE_WORKERS == 2
+
+          processor = NationwideProcessor.__new__(NationwideProcessor)
+          processor.algorithm = algorithm
+          request_params = processor._params(
+              "Enexis_Opendata:asm_e_lv_map_cable",
+              "display_text",
+              5001,
+              bbox=(1, 100000, 400000, 125000, 425000),
+          )
+          assert "startIndex" not in request_params
+          assert "sortBy" not in request_params
+          assert request_params["propertyName"] == "display_text,geografischeligging"
+          assert "bbox" in request_params
+          children = NationwideProcessor._split_tile((1, 0, 0, 100, 100))
+          assert len(children) == 4
 
           properties = {
               "object_id": 1,
@@ -105,7 +121,11 @@ jobs:
           matches = [name for name in names if "e_lv_map_cable" in name.lower()]
           if not matches:
               raise RuntimeError("e_lv_map_cable niet gevonden in GetCapabilities")
-          type_name = min(matches, key=lambda value: (len(value), value))
+          exact = [
+              name for name in matches
+              if name.split(":")[-1].lower() == "asm_e_lv_map_cable"
+          ]
+          type_name = min(exact or matches, key=lambda value: (len(value), value))
           params = {
               "service": "WFS",
               "version": "2.0.0",
