@@ -44,6 +44,7 @@ class Qgis42CompatibilityTests(unittest.TestCase):
 
     def test_fast_algorithm_adds_refresh_and_matched_only_parameters(self):
         text = (ROOT / "algorithm_fast.py").read_text(encoding="utf-8")
+        self.assertIn('TYPE_HINT = "asm_e_lv_map_cable"', text)
         self.assertIn('REFRESH_WFS_INDEX = "REFRESH_WFS_INDEX"', text)
         self.assertIn('ONLY_MATCHED_OUTPUT = "ONLY_MATCHED_OUTPUT"', text)
         self.assertIn("QgsProcessingParameterBoolean", text)
@@ -70,14 +71,20 @@ class Qgis42CompatibilityTests(unittest.TestCase):
         self.assertIn("CREATE TABLE wfs_labels", index_text)
         self.assertIn("source_key TEXT PRIMARY KEY", index_text)
 
-    def test_nationwide_uses_bbox_tiles_and_bounded_parallelism(self):
+    def test_nationwide_uses_adaptive_bbox_tiles_and_bounded_parallelism(self):
         active = (ROOT / "nationwide.py").read_text(encoding="utf-8")
         hot = (ROOT / "nationwide_fast.py").read_text(encoding="utf-8")
         self.assertIn("TILE_SIZE_M = 25000.0", active)
         self.assertIn("MAX_TILE_WORKERS = 2", active)
-        self.assertIn('params["bbox"]', active)
+        self.assertIn('params["bbox"]', hot)
         self.assertIn("ThreadPoolExecutor(max_workers=self.MAX_TILE_WORKERS)", hot)
         self.assertIn("tile_bounds", hot)
+        self.assertIn("def _split_tile", hot)
+        self.assertIn("self.TILE_PAGE_SIZE + 1", hot)
+        self.assertIn("pending_tiles.extend(self._split_tile(current))", hot)
+        self.assertNotIn('params["startIndex"]', hot)
+        self.assertNotIn('params["sortBy"]', hot)
+        self.assertNotIn('"fid", self.algorithm.GEOMETRY_FIELD', hot)
 
     def test_nationwide_does_not_copy_full_csv_index(self):
         active = (ROOT / "nationwide.py").read_text(encoding="utf-8")
