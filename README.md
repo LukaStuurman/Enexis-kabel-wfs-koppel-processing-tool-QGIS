@@ -19,9 +19,11 @@ De netwerkverbinding met Enexis is dan niet meer de bottleneck, tenzij **Vernieu
 
 ### 1. WFS-download per RD-tegel
 
-De eerste WFS-index wordt niet meer als één landelijke `startIndex`-reeks opgehaald. Nederland wordt verdeeld in RD-tegels van **25 × 25 km**. Iedere tegel gebruikt een WFS `bbox`.
+De eerste WFS-index wordt niet meer als één landelijke `startIndex`-reeks opgehaald. Nederland wordt verdeeld in RD-hoofdtegels van **25 × 25 km**. Iedere tegel gebruikt een WFS `bbox`.
 
-In een uitzonderlijk drukke tegel mag WFS intern nog pagineren, maar die offset geldt alleen binnen die kleine tegel. Objecten op tegelgrenzen worden via hun WFS-ID of een geometry-hash gededupliceerd.
+Een hoofdtegel vraagt maximaal 5.001 objecten. Komt er meer terug of wordt de response te groot, dan wordt uitsluitend die tegel automatisch in vier kleinere BBOX-tegels verdeeld. Dit gaat adaptief door tot de response veilig past. De actieve landelijke route heeft daardoor geen `startIndex`- of `sortBy=fid`-paginering nodig.
+
+Objecten op tegelgrenzen worden via hun WFS-feature-ID of, wanneer die niet beschikbaar is, een stabiele label+geometry-hash gededupliceerd. Onder ongeveer 1 km tegelgrootte stopt de plugin gecontroleerd wanneer een tegel nog steeds boven de veiligheidsgrens zit, zodat WFS-truncatie nooit stil wordt geaccepteerd.
 
 ### 2. Permanente WFS-index
 
@@ -60,7 +62,7 @@ Dit voorkomt miljoenen onnodige outputwrites. Schakel de optie uit wanneer een v
 
 ### 5. Begrensde parallelisatie
 
-De WFS-indexbouw gebruikt maximaal **2 gelijktijdige tegelrequests**. Dit versnelt netwerk-I/O zonder terug te gaan naar de agressieve parallelle aanpak uit oude pluginversies.
+De WFS-indexbouw gebruikt maximaal **2 gelijktijdige tegelrequests**. Dit versnelt netwerk-I/O zonder terug te gaan naar agressieve parallelisatie.
 
 Ruwe tegelresponses worden naar tijdelijke bestanden geschreven. QGIS-geometrieparsing en SQLite-inserts gebeuren gecontroleerd buiten de netwerkthreads, zodat grote geometrysets niet tegelijk als Python/QGIS-objecten in RAM staan.
 
@@ -68,9 +70,9 @@ Ruwe tegelresponses worden naar tijdelijke bestanden geschreven. QGIS-geometriep
 
 GeoServer kan WFS GeoPackage-output aanbieden wanneer de GeoPackage Output Extension op de server is geïnstalleerd. v0.14 controleert dit tijdens een WFS-indexbouw met een echte minimale `outputFormat=geopkg`-request.
 
-Als GeoPackage beschikbaar is, benchmark de plugin een kleine GeoJSON- en GeoPackage-response. GeoPackage wordt alleen gekozen wanneer de live meting een duidelijk voordeel in responstijd of overdrachtsgrootte laat zien. Anders blijft GeoJSON de tegelindeling voeden.
+**Live controle op 21 augustus 2026:** Enexis GetCapabilities rapporteerde het kabeltype als `Enexis_Opendata:asm_e_lv_map_cable`. Een WFS `GetFeature` met `outputFormat=geopkg` gaf HTTP 400. De huidige Enexis WFS biedt dus geen directe GeoPackage-output aan en v0.14 gebruikt momenteel GeoJSON voor de tegelindex.
 
-Dit is bewust dynamisch: een GeoPackage-response kan compacter zijn, maar GeoServer moet hiervoor zelf tijdelijk een SQLite/GeoPackage maken. Beschikbaar betekent dus niet automatisch sneller.
+De probe blijft in de plugin aanwezig. Als Enexis de GeoPackage-extensie later inschakelt, wordt dit automatisch ontdekt. Als GeoPackage beschikbaar is, benchmark de plugin een kleine GeoJSON- en GeoPackage-response en kiest GeoPackage alleen wanneer de live meting een duidelijk voordeel in responstijd of overdrachtsgrootte laat zien.
 
 ## CSV-index
 
@@ -139,4 +141,4 @@ De plugin bevat ook **Split gekoppelde kabels naar DXF (V6 - landelijk)**. De la
 
 Doelplatform: **QGIS 4.2.0 / Qt6**.
 
-CI draait de pure Python-index/matchingtests en importeert de actieve provider in de officiële `qgis/qgis:4.2.0-questing` container met Qt offscreen.
+CI draait de pure Python-index/matchingtests, importeert de actieve provider in de officiële `qgis/qgis:4.2.0-questing` container met Qt offscreen en voert daarnaast een niet-blokkerende live Enexis WFS-formaatprobe uit.
