@@ -2,6 +2,91 @@
 
 QGIS Processing-plugin die Enexis `e_lv_map_cable`-kabellijnen **strikt 1-op-1** koppelt aan rijen uit een CSV-export.
 
+## Nieuw in v0.12.0: landelijke WFS-CSV-koppeling op schijf
+
+Laat **Beperk WFS tot scherm/gebied** leeg om heel Nederland te verwerken. De
+plugin gebruikt dan niet langer de oude route die alle volledige CSV-rijen in
+RAM hield en voor ieder groepje CSV-labels een aparte landelijke WFS-filter
+uitvoerde.
+
+De landelijke route werkt nu als volgt:
+
+1. de CSV wordt één keer naar een tijdelijke SQLite-index op een lokale schijf
+   gestreamd;
+2. de WFS wordt één keer paginagewijs in stabiele `fid`-volgorde gelezen, met
+   alleen `label`, `fid` en geometrie;
+3. alleen WFS-kabels waarvan het label ook in de CSV staat blijven in de
+   tijdelijke schijfcache;
+4. na de download worden CSV en WFS per maximaal 50 gezamenlijke labels vanaf
+   schijf geladen;
+5. binnen ieder label blijft de bestaande strikte 1-op-1 lengtematching gelden;
+6. gekoppelde lijnen en niet-gekoppelde CSV-rijen worden rechtstreeks naar de
+   gekozen uitvoer geschreven;
+7. de tijdelijke SQLite-cache wordt altijd gesloten en verwijderd.
+
+De WFS-pagina bevat maximaal 10.000 objecten en maximaal 64 MB. Tijdelijke
+netwerk- en serverfouten worden maximaal drie keer opnieuw geprobeerd.
+
+### Gemeten met de meegeleverde landelijke CSV
+
+De CSV van 18 augustus 2026 is 504.444.333 bytes groot en bevat 1.992.366
+rijen en 666.693 geldige unieke labels. Het bouwen van de CSV-schijfindex duurde
+in de lokale QGIS 4.2-test circa 32 seconden. De index was 693 MB. Eén echte,
+stabiel gesorteerde WFS-pagina bevatte 10.000 van in totaal 1.990.383
+kabeldelen; 9.292 daarvan hadden een label dat ook in de CSV voorkwam. De
+gemeten piek van het volledige testproces was circa 316 MB RAM.
+
+Voor een landelijke uitvoering:
+
+- kies voor beide uitvoerlagen een **GeoPackage op lokale SSD**, geen tijdelijke
+  geheugenlaag;
+- kies bij **Landelijke modus: tijdelijke cachemap** eveneens een lokale SSD;
+- houd minimaal 5 GB vrije schijfruimte beschikbaar;
+- reken door de bijna twee miljoen WFS-geometrieën op tientallen minuten of
+  langer, afhankelijk van GeoServer en de verbinding.
+
+## Nieuw in v0.11.0: landelijke DXF-streaming
+
+Voor een export van heel Nederland heeft **Split gekoppelde kabels naar DXF
+(V6 - landelijk)** een aparte streamingmodus. Schakel **Landelijke
+streamingmodus** in om:
+
+- alle kabels uit de invoerlaag zonder selectie of zoekradius te verwerken;
+- standaard alleen objecten met `match_status = GEKOPPELD` te exporteren;
+- alleen geometrie, `wfs_label_norm`, `csv_Type` en `match_status` bij de
+  bronprovider op te vragen;
+- iedere kabel direct naar DXF te schrijven, zonder landelijke
+  geometrieverzameling in RAM;
+- automatisch een nieuw bestand `Nederland_Kabels_0001.dxf`,
+  `Nederland_Kabels_0002.dxf`, enzovoort te starten;
+- het maximale aantal kabels per DXF-deel in te stellen (standaard 25.000).
+
+Lijnen samenvoegen wordt in de landelijke modus bewust overgeslagen. Dat zou
+alle geometrieën per laagnaam opnieuw in het geheugen moeten verzamelen en het
+belangrijkste schaalvoordeel tenietdoen. Kleuren worden met een stabiele hash
+per projectcode gekozen, zodat dezelfde projectcode in ieder DXF-deel dezelfde
+kleur houdt.
+
+## Nieuw in v0.10.0: gekoppelde kabels naar DXF
+
+De plugin bevat nu naast de WFS-CSV-koppeling ook **Split gekoppelde kabels
+naar DXF (V6 - landelijk)**. Deze tool werkt rechtstreeks met de uitvoerlaag van de
+koppeltool:
+
+- standaard labelveld `wfs_label_norm`;
+- standaard kabeltypeveld `csv_Type`;
+- herkent een gekoppeld label zoals `BEK4020-04` en haalt daar projectcode
+  `BEK4020` uit;
+- ondersteunt als terugval ook oudere velden zoals `label`, `KabelType` en
+  labels met de prefix `Kabelgroup:`;
+- beperkt de scan tot de bounding box van de selectie plus een instelbare
+  zoekradius;
+- kan alles in één DXF schrijven of één DXF per projectcode maken.
+
+Gebruik: selecteer in `Gekoppelde Enexis WFS-lijnen` één of meer kabels en open
+**Processing → Toolbox → Enexis → Kabelkoppeling → Split gekoppelde kabels naar
+DXF (V6 - landelijk)**.
+
 ## Gebruik v0.9.0
 
 Versie **0.9.0** houdt een landelijke CSV in extentmodus niet meer volledig in
@@ -122,7 +207,7 @@ De plugin is gericht op **QGIS 4.2.0 / Qt6** en gebruikt de QGIS 4 API.
 2. Start QGIS 4.2.0 opnieuw.
 3. Verwijder de oude pluginversie.
 4. Installeer de nieuwste repository-ZIP.
-5. Controleer dat **versie 0.8.0** actief is.
+5. Controleer dat **versie 0.12.0** actief is.
 6. Open **Processing → Toolbox → Enexis → Kabelkoppeling → Koppel Enexis WFS-kabels aan CSV (snelle extent-scan)**.
 7. Kies de CSV en **Use current map canvas extent**.
 8. Kijk bij een resultaat met 0 matches in het Processing-log naar `WFS-voorbeeld` en `CSV-voorbeeld`.

@@ -3,6 +3,7 @@
 from qgis.core import QgsProcessingProvider
 
 from .algorithm_auto import KoppelWfsCsvAutoAlgorithm
+from .algorithm_dxf import SplitNaarDXF
 
 
 class EnexisKabelProvider(QgsProcessingProvider):
@@ -17,3 +18,4 @@ class EnexisKabelProvider(QgsProcessingProvider):
 
     def loadAlgorithms(self):
         self.addAlgorithm(KoppelWfsCsvAutoAlgorithm())
+        self.addAlgorithm(SplitNaarDXF())

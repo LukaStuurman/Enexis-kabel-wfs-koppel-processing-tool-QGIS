@@ -50,6 +50,22 @@ class KoppelWfsCsvAlgorithm(QgsProcessingAlgorithm):
         except csv.Error:
             return ";"
 
+    def _csv_schema(self, path):
+        delimiter = self._detect_delimiter(path)
+        with open(path, "r", encoding="utf-8-sig", newline="") as handle:
+            reader = csv.DictReader(handle, delimiter=delimiter)
+            fieldnames = reader.fieldnames or []
+        missing = [
+            name
+            for name in (self.CSV_LABEL_FIELD, self.CSV_LENGTH_FIELD)
+            if name not in fieldnames
+        ]
+        if missing:
+            raise QgsProcessingException(
+                "CSV mist verplichte kolom(men): " + ", ".join(missing)
+            )
+        return delimiter, fieldnames
+
     def _read_csv(self, path, allowed_labels=None):
         """Read CSV rows, optionally retaining only labels found in an extent.
 
@@ -57,20 +73,10 @@ class KoppelWfsCsvAlgorithm(QgsProcessingAlgorithm):
         created. This keeps a nationwide CSV cheap in extent mode while still
         scanning it once with the standards-compliant CSV parser.
         """
-        delimiter = self._detect_delimiter(path)
+        delimiter, fieldnames = self._csv_schema(path)
         allowed = None if allowed_labels is None else set(allowed_labels)
         with open(path, "r", encoding="utf-8-sig", newline="") as handle:
             reader = csv.DictReader(handle, delimiter=delimiter)
-            fieldnames = reader.fieldnames or []
-            missing = [
-                name
-                for name in (self.CSV_LABEL_FIELD, self.CSV_LENGTH_FIELD)
-                if name not in fieldnames
-            ]
-            if missing:
-                raise QgsProcessingException(
-                    "CSV mist verplichte kolom(men): " + ", ".join(missing)
-                )
             rows = []
             total_rows = 0
             sample_labels = set()
