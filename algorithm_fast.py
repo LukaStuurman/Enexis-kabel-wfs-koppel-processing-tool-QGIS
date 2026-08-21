@@ -8,6 +8,10 @@ from .nationwide_fast import NationwideProcessor
 
 
 class KoppelWfsCsvAutoAlgorithm(BaseKoppelWfsCsvAutoAlgorithm):
+    # Live GetCapabilities on 2026-08-21 reports
+    # Enexis_Opendata:asm_e_lv_map_cable. Keep only the local-name hint here so
+    # discovery still survives a future workspace/namespace rename.
+    TYPE_HINT = "asm_e_lv_map_cable"
     REFRESH_WFS_INDEX = "REFRESH_WFS_INDEX"
     ONLY_MATCHED_OUTPUT = "ONLY_MATCHED_OUTPUT"
 
