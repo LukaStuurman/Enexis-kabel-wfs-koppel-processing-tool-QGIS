@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import re
 import sqlite3
 
 from qgis.core import (
@@ -23,6 +24,11 @@ from .shape_archive import (
     ensure_shape_archive,
 )
 from .wfs_index import WfsIndexBuilder, WfsIndexError, open_existing
+
+
+_SHAPE_PREFIX_RE = re.compile(
+    r"^\s*(?:Kabelgroep|Cablegroup)\s*:\s*", re.IGNORECASE
+)
 
 
 class ShapeNationwideProcessor(NationwideProcessor):
@@ -80,6 +86,12 @@ class ShapeNationwideProcessor(NationwideProcessor):
             return 75
         return 0
 
+    @staticmethod
+    def _normalize_shape_label(value):
+        label = normalize_label(value)
+        label = _SHAPE_PREFIX_RE.sub("", label, count=1)
+        return label.strip()
+
     def _detect_shape_label_field(self, layer):
         fields = [field.name() for field in layer.fields()]
         scored = sorted(
@@ -97,7 +109,11 @@ class ShapeNationwideProcessor(NationwideProcessor):
                     value = str(feature[name] or "").strip().casefold()
                 except Exception:
                     value = ""
-                if value.startswith("kabelgroup:") or value.startswith("kabelgroep:"):
+                if (
+                    value.startswith("kabelgroup:")
+                    or value.startswith("kabelgroep:")
+                    or value.startswith("cablegroup:")
+                ):
                     prefix_hits[name] += 1
         ranked = sorted(
             ((hits, name) for name, hits in prefix_hits.items() if hits), reverse=True
@@ -201,7 +217,7 @@ class ShapeNationwideProcessor(NationwideProcessor):
                         label_value = feature[label_field]
                     except Exception:
                         label_value = None
-                    label = normalize_label(label_value)
+                    label = self._normalize_shape_label(label_value)
                     geometry = QgsGeometry(feature.geometry())
                     if not label or geometry is None or geometry.isEmpty():
                         continue
