@@ -1,11 +1,11 @@
 [general]
 name=Enexis Kabel WFS-CSV Koppeling
 description=QGIS 4.2 Processing-tools met herbruikbare CSV- en kabelindex, automatische Enexis SHAPE Noord/Zuid-download, WFS-fallback, snelle extentkoppeling en landelijke DXF-export.
-version=0.15.1
+version=0.15.2
 qgisMinimumVersion=4.2
 author=LukaStuurman
 email=
-about=QGIS 4.2 low-resource tools. Voor landelijke verwerking kan worden gekozen tussen WFS, SHAPE Noord, SHAPE Zuid en SHAPE Noord + Zuid. De SHAPE-opties downloaden automatisch de Enexis ZIP via de ingestelde downloadlink, pakken alleen imkl_elektriciteitskabel_e_lv_map_cable_ligging uit, detecteren de Noord- en Zuid-SHAPE en bouwen daaruit een herbruikbare lokale SQLite-kabelindex. Noord + Zuid is standaard voor heel Nederland. De bestaande WFS-tegelindex blijft als fallback beschikbaar en extentruns blijven de lichte WFS-labelscan en CSV-labelindex gebruiken.
+about=QGIS 4.2 low-resource tools. Voor landelijke verwerking kan worden gekozen tussen WFS, SHAPE Noord, SHAPE Zuid en SHAPE Noord + Zuid. De SHAPE-opties downloaden rechtstreeks de publiek beschikbare Enexis Open_Asset_Data_Elektra.zip vanaf de Enexis S3-publicatiebron, pakken alleen imkl_elektriciteitskabel_e_lv_map_cable_ligging uit, detecteren de Noord- en Zuid-SHAPE en bouwen daaruit een herbruikbare lokale SQLite-kabelindex. Noord + Zuid is standaard voor heel Nederland. De bestaande WFS-tegelindex blijft als fallback beschikbaar en extentruns blijven de lichte WFS-labelscan en CSV-labelindex gebruiken.
 category=Vector
 experimental=False
 deprecated=False
